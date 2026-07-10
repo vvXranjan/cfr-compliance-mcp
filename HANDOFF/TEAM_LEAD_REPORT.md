@@ -2,7 +2,7 @@
 ## Contract Compliance POC — eCFR MCP Server
 
 **Prepared by:** Vvr
-**Status:** In Progress — Milestone 4 (Core MCP Server Build: Caching + Parsing Layers Complete)
+**Status:** MCP SERVER MILESTONE COMPLETE — all 7 layers built, reviewed, and documented
 
 ---
 
@@ -43,13 +43,14 @@ Contract → Clause Extraction → Agno Agent → Custom MCP Server
   → Official eCFR REST API → LLM Compliance Reasoning → Compliance Report
 ```
 
-The MCP server is a layered Python application:
-- **Config & logging layer** — typed, environment-driven settings; structured logging to stderr (required for MCP's stdio transport).
-- **Client layer** — a generic, reusable async HTTP client (retries, timeouts, rate limiting) plus an eCFR-specific client built on top of it, handling real eCFR quirks (date lag, search history pollution).
+The MCP server is a layered Python application, now fully built:
+- **Config & logging layer** *(complete)* — typed, environment-driven settings; structured logging to stderr (required for MCP's stdio transport).
+- **Client layer** *(complete)* — a generic, reusable async HTTP client (retries, timeouts, rate limiting) plus an eCFR-specific client built on top of it, handling real eCFR quirks (date lag, search history pollution).
 - **Caching layer** *(complete)* — backend-agnostic, string-in/string-out interface; avoids redundant network calls across clauses referencing the same regulation.
 - **Parsing layer** *(complete)* — converts raw eCFR XML into clean text with structured citations.
-- **Tool layer** *(in progress)* — 8 MCP tools exposed to the agent: `search_regulations`, `search_by_keyword`, `retrieve_section`, `retrieve_part`, `retrieve_title`, `get_title_structure`, `get_version_history`, `list_agencies`.
-- **Server entrypoint** *(pending)* — wires everything into a runnable FastMCP application.
+- **Models layer** *(complete)* — Pydantic request/response validation for all 8 tools.
+- **Tool layer** *(complete)* — all 8 MCP tools exposed to the agent: `search_regulations`, `search_by_keyword`, `retrieve_section`, `retrieve_part`, `retrieve_title`, `get_title_structure`, `get_version_history`, `list_agencies`.
+- **Server entrypoint** *(complete)* — `server.py` wires everything into a runnable FastMCP application.
 
 ## Modules Completed
 
@@ -64,14 +65,14 @@ The MCP server is a layered Python application:
 | eCFR API client (`clients/ecfr_client.py`) | Complete | All 8 required data-access methods, quirk-handling built in |
 | Caching layer (`cache/cache_backend.py`) | Complete | Backend-agnostic (string-in/string-out) interface; in-memory TTL implementation; functionally tested this session; Redis is a drop-in future upgrade |
 | Parsing layer (`parsing/xml_parser.py`) | Complete | Streaming XML parser, tag-agnostic; functionally tested against realistic eCFR XML; one real bug found and fixed in review |
-| Input/output validation models | Not started | Next module |
-| MCP tool implementations (8 tools) | Not started | |
-| Server entrypoint | Not started | |
-| Automated tests | Not started | |
+| Input/output validation models (`models/`) | Complete | 8 request models + 9 response models; two real date-validation bugs found and fixed during testing |
+| MCP tool implementations (8 tools + shared helpers) | Complete | Factory-function pattern for testability; cache-integration behavior verified against the real cache backend; one real bug found and fixed |
+| Server entrypoint (`server.py`) | Complete | FastMCP app wiring; `HttpClient` lifecycle managed via `try/finally`; disclosed risk: `fastmcp` API calls unverified against a live install (no network access) |
+| Automated tests | Not started | Verification so far is thorough but ad hoc (inline functional scripts), not committed as `pytest` files |
 
 ## Current Progress
 
-The foundation, client, caching, and parsing layers of the MCP server are now complete and internally consistent — every file has been syntax-verified, and the caching and parsing layers were additionally functionally tested at runtime this session. The parsing layer's code review caught and fixed a real formatting bug (source-XML line-wrapping leaking into output paragraphs) before sign-off — exactly the kind of issue a review process is meant to catch. Combined, these four layers deliver the full "talk to eCFR reliably, don't repeat the same call twice, and hand back clean, citable text" capability. No live network integration testing against the real eCFR API has occurred yet, since this was built in an offline sandbox — that remains the first task once work resumes in a connected environment.
+**The MCP server is now fully code-complete: all 7 layers are built** (foundation, clients, cache, parsing, models, tools, server entrypoint). Every file has been syntax-verified, and a full post-completion engineering review traced the entire dependency graph (confirmed clean, no circular imports), cross-referenced every tool's calls against actual method and model signatures (all consistent), and swept for code-hygiene issues (none found). Four real bugs were caught and fixed over the course of the build — two date-validation bugs, one XML-whitespace formatting bug, and one cache-key type bug — each caught by direct functional testing or code review before sign-off, not left for later discovery. Three verification gaps remain, all disclosed explicitly rather than hidden: no live network call to the real eCFR API, no live `fastmcp` verification, and no live `pydantic` `BaseModel` verification (all three blocked by this build environment having no network access — confirmed via an actual failed `pip install` attempt, not assumed). These are the right next steps once network access is available, and no known code defects are being carried forward.
 
 ## Implementation Decisions
 
@@ -82,20 +83,20 @@ The foundation, client, caching, and parsing layers of the MCP server are now co
 - Cache interface deliberately operates on strings only (not arbitrary Python objects), so a future Redis-backed implementation requires no changes to any calling code.
 - Unimplemented cache backends fail loudly rather than silently degrading, to prevent hidden production misconfiguration.
 - XML parsing is tag-agnostic (extracts text from every element rather than a hardcoded tag whitelist), making it robust to eCFR schema variation across different CFR titles.
+- Tools are built as factory functions (`make_<tool>_tool(ecfr_client, cache) -> Callable`) rather than reading global state, so the shared `EcfrClient`/`CacheBackend` are injected once by `server.py` and every tool stays independently unit-testable.
+- Response models use two tiers of strictness: strict validation (`extra="forbid"`) for data shapes we fully control, and lenient passthrough (`extra="allow"` / raw dicts) for externally-controlled eCFR JSON shapes not yet live-verified — avoiding brittle validation against an unconfirmed schema.
 
 ## Remaining Work
 
-1. Pydantic request/response models for all 8 tools.
-2. Implementation of all 8 MCP tools.
-3. FastMCP server entrypoint wiring everything together.
-4. Automated test suite.
-5. Live integration testing against the real eCFR API.
-6. README and setup documentation.
-7. *(Expanded scope)* Contract Parser, Agno Team/Agent integration, Compliance Engine, and `demo.py` — planned as a separate sibling package once the MCP server itself is complete.
+1. Automated `pytest` test suite (formalizing this session's ad hoc verification into reusable tests).
+2. Live integration testing against the real eCFR API.
+3. Live verification of `fastmcp` and `pydantic` behavior (both unavailable in the offline build sandbox).
+4. README smoke-test once `uv sync` is possible.
+5. *(Expanded scope)* Contract Parser, Agno Team/Agent integration, Compliance Engine, and `demo.py` — planned as a separate sibling package, starting next.
 
 ## Next Milestone
 
-Complete the validation models layer, followed by the 8 MCP tool implementations — bringing the server to a fully runnable, testable state, ready for the FastMCP server entrypoint (the final piece of the MCP server itself).
+Contract Parser (PDF/DOCX ingestion + clause extraction) — the first component of the expanded end-to-end pipeline, to be built as a sibling package per `ARCHITECTURE.md`. This involves new architectural decisions (PDF/DOCX parsing library choice, clause-segmentation strategy) that will be presented before implementation begins.
 
 ## Timeline
 
@@ -106,19 +107,21 @@ Complete the validation models layer, followed by the 8 MCP tool implementations
 | Foundation + client layer | Complete |
 | Caching layer | Complete |
 | Parsing layer | Complete |
-| Validation models + tool layer | Next |
-| Server entrypoint + tests | Upcoming |
-| Live integration validation | Upcoming |
+| Validation models + tool layer | Complete |
+| Server entrypoint | Complete |
+| **MCP server milestone** | **Complete** |
+| Automated tests + live integration validation | Upcoming |
 | Contract Parser + Agno integration + Compliance Engine + demo.py | Not started (expanded scope, separate sibling package) |
 
 ## Risks
 
-- **No live network testing against the real eCFR API performed yet** — first connected-environment task is a smoke test against it. (The caching and parsing layers' own logic have each been functionally verified independently this session.)
+- **No live network testing against the real eCFR API performed yet** — first connected-environment task is a smoke test against it.
+- **`fastmcp` and `pydantic` behavior unverified against live installs** — this build sandbox has no network access (confirmed via a failed `pip install` attempt), so both packages' actual runtime behavior could not be exercised. Mitigated by extracting and testing the underlying logic wherever possible, and disclosed explicitly rather than assumed correct.
 - **Large CFR titles can time out** on full-title retrieval upstream; mitigated by preferring part/section-level requests, but not yet stress-tested.
 - **eCFR is not the CFR's legal edition of record** — may require a disclaimer or secondary verification step for high-stakes compliance determinations.
 - **Clause-to-CFR mapping** (deciding which title/part is relevant to an arbitrary contract clause) remains an open design problem for the Agno agent stage, not yet addressed.
-- **Citation browse-URL format is unverified** — constructed from eCFR's documented URL pattern but not confirmed against a live request (no network access in the build environment); flagged explicitly in code and docs rather than silently assumed correct.
+- **Citation browse-URL format is unverified** — constructed from eCFR's documented URL pattern but not confirmed against a live request; flagged explicitly in code and docs rather than silently assumed correct.
 
 ## Conclusion
 
-The project is on track. The research phase — including the follow-up "LCP" evaluation — validated that building a custom MCP server was the right call, and the foundation, client, caching, and parsing layers are now complete, well-documented, and verified (syntax and, where applicable, functional testing plus code review that caught and fixed a real bug). The hardest "unknowns" (eCFR's real-world XML quirks and API quirks) have already been identified and handled in code. The remaining work is well-scoped and sequenced: validation models, tool implementation, and the server entrypoint complete the MCP server; the expanded end-to-end scope (Contract Parser, Agno integration, Compliance Engine, demo) follows as a separate, architecturally decoupled milestone. No blockers currently exist.
+**The MCP server milestone is complete.** All 7 layers — foundation, clients, cache, parsing, models, tools, and server entrypoint — are built, internally consistent, and have passed a full post-completion engineering review with no new defects found. Four real bugs were caught and fixed during development, each through direct testing rather than left latent. The three remaining verification gaps (live eCFR, live fastmcp, live pydantic) are clearly scoped, disclosed, and are the correct first steps once network access is available — no known code defects are being carried forward into the next phase. Per instruction, work stops here before Contract Parser begins, pending review of this milestone.

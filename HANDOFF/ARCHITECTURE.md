@@ -7,7 +7,7 @@ This document describes the internal architecture of the MCP server itself (not 
 
 ```
 ┌───────────────────────────────────────────────────────────────────┐
-│  tools/  (NOT YET BUILT)                                          │
+│  tools/  ✅ COMPLETE                                               │
 │  8 MCP tools — thin orchestration per tool:                       │
 │  validate input → check cache → call EcfrClient → parse XML       │
 │  if applicable → shape structured JSON output                     │
@@ -16,7 +16,7 @@ This document describes the internal architecture of the MCP server itself (not 
               ▼              ▼              ▼                     ▼
 ┌───────────────────┐ ┌─────────────┐ ┌──────────────┐  ┌──────────────────┐
 │ models/            │ │ cache/      │ │ parsing/      │  │ clients/          │
-│ (NOT YET BUILT)     │ │ ✅ COMPLETE │ │ ✅ COMPLETE   │  │ ✅ COMPLETE        │
+│ ✅ COMPLETE         │ │ ✅ COMPLETE │ │ ✅ COMPLETE   │  │ ✅ COMPLETE        │
 │ Pydantic request/   │ │ Backend-    │ │ Raw XML →     │  │ ecfr_client.py     │
 │ response validation │ │ agnostic    │ │ clean text +  │  │ (eCFR-specific)    │
 │                     │ │ cache       │ │ citations     │  │ built on           │
@@ -35,6 +35,9 @@ Cross-cutting (used by every layer above):
 │  config.py (Settings, env-driven) │ logging_config.py (stderr-only) │
 │  exceptions.py (CfrMcpError hierarchy) │ constants.py (eCFR protocol facts) │
 └───────────────────────────────────────────────────────────────────┘
+
+server.py ✅ COMPLETE — sits above tools/, owns the FastMCP app instance,
+registers all 8 tools, manages HttpClient lifecycle (start/aclose).
 ```
 
 ## Layer Responsibilities
@@ -48,12 +51,12 @@ Cross-cutting (used by every layer above):
 | `clients/http_client.py` | Generic, API-agnostic async HTTP transport: retries, timeouts, rate limiting | Know anything about eCFR specifically |
 | `clients/ecfr_client.py` | eCFR endpoint knowledge, date-lag/search quirk handling, translates `Http*Error` → `Ecfr*Error` | Parse XML or validate business-level input |
 | `cache/cache_backend.py` | Backend-agnostic string cache with TTL | Know what's being cached (no eCFR-specific logic) |
-| `parsing/xml_parser.py` *(pending)* | Raw eCFR XML → clean text + citation metadata | Make network calls or know about caching |
-| `models/*.py` *(pending)* | Pydantic input validation + structured output shaping | Contain retrieval or parsing logic |
-| `tools/*.py` *(pending)* | Thin orchestration — wire the above layers together per MCP tool | Contain business logic that belongs in a lower layer |
-| `server.py` *(pending)* | FastMCP app instance, tool registration, `HttpClient` lifecycle management | Contain tool-specific logic |
+| `parsing/xml_parser.py` | Raw eCFR XML → clean text + citation metadata | Make network calls or know about caching |
+| `models/*.py` | Pydantic input validation + structured output shaping | Contain retrieval or parsing logic |
+| `tools/*.py` | Thin orchestration — wire the above layers together per MCP tool | Contain business logic that belongs in a lower layer |
+| `server.py` | FastMCP app instance, tool registration, `HttpClient` lifecycle management | Contain tool-specific logic |
 
-## Data Flow (once complete)
+## Data Flow (as implemented)
 
 ```
 Agno Agent calls MCP tool, e.g. retrieve_section(title=40, part="261", section="10")
@@ -90,10 +93,12 @@ eventual compliance report's audit trail.
 | Clients (`http_client`, `ecfr_client`) | ✅ Complete |
 | Cache (`cache_backend`) | ✅ Complete |
 | Parsing (`xml_parser`) | ✅ Complete |
-| Models (`requests`, `responses`) | ❌ Not started (next) |
-| Tools (8 files) | ❌ Not started |
-| Server (`server.py`) | ❌ Not started |
+| Models (`requests`, `responses`) | ✅ Complete |
+| Tools (8 files + `_common.py`) | ✅ Complete |
+| Server (`server.py`) | ✅ Complete |
 | Tests | ❌ Not started |
+
+**MCP server: 7/7 layers complete.** A full engineering review (dependency-graph tracing, cross-module signature verification, code-hygiene sweep) was performed after `server.py` was finished — no new defects found; all 4 previously-caught bugs (2 date-validator, 1 XML-whitespace, 1 cache-key-tuple) confirmed still fixed. The only remaining gaps are three disclosed, unexercised-due-to-no-network-access verification steps: live eCFR API calls, live `fastmcp` behavior, and live `pydantic` `BaseModel` validation (validator *logic* was tested standalone instead). See `PROJECT_HANDOFF.md` Section 6 for full detail.
 
 This document should be updated whenever a layer's responsibilities, boundaries, or data flow change — not just when files are added. If a future module changes how layers interact (e.g., if the tool layer ends up calling the cache before or after validation differently than described above), update the Data Flow section accordingly.
 
@@ -118,4 +123,4 @@ repo root/
 
 **Why a sibling package, not a subpackage of `cfr_compliance_mcp`:** the MCP server and the agent/pipeline that *consumes* it are architecturally distinct processes communicating over the MCP protocol (stdio or HTTP) — mixing them into one package would blur that boundary and make the MCP server harder to reason about, test, and potentially deploy independently (e.g., as a hosted MCP endpoint other tools could also connect to). This mirrors how the `court-listener-mcp`/Vaquill-AI research (Milestone 3.5) showed MCP servers being consumed by multiple different client types — our server should stay equally decoupled from any one consumer.
 
-**Build order (per team lead's instructions, unchanged):** parsing → models → tools → server.py [completes the MCP server] → Contract Parser → Agno Integration → Compliance Engine → Testing → Documentation → Demo.
+**Build order (per team lead's instructions):** ~~parsing → models → tools → server.py [completes the MCP server]~~ **DONE** → Contract Parser → Agno Integration → Compliance Engine → Testing → Documentation → Demo. Per explicit instruction, work stops here (MCP server milestone) before Contract Parser begins.

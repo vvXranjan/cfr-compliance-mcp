@@ -72,9 +72,58 @@ Files created:
 Documentation updated this milestone: `PROJECT_HANDOFF.md`, `PROJECT_PROGRESS.md` (this file), `TEAM_LEAD_REPORT.md`, `ARCHITECTURE.md`, `README.md` (created).
 
 ## Milestone 5 — Models Layer
-**Status:** Next
+**Status:** Complete
 
-See the PROJECT STATUS block at the end of this session's conversation for details once complete.
+Files created:
+- `src/cfr_compliance_mcp/models/requests.py` — 8 Pydantic request models (`SearchRegulationsRequest`, `SearchByKeywordRequest`, `RetrieveSectionRequest`, `RetrievePartRequest`, `RetrieveTitleRequest`, `GetTitleStructureRequest`, `GetVersionHistoryRequest`, `ListAgenciesRequest`), sharing a `_TitleScopedRequest` base for the 4 title-scoped tools. `extra="forbid"` throughout.
+- `src/cfr_compliance_mcp/models/responses.py` — `CitationModel`, `RegulationTextResponse`, `TitleSummary`, `TitleStructureResponse`, `SearchResultItem`, `SearchResponse`, `VersionHistoryResponse`, `AgenciesResponse`, `ErrorResponse`. Two-tier strictness: `_StrictResponse` for data we control, `_PassthroughResponse`/raw `dict[str, Any]` for not-live-verified eCFR shapes.
+- `src/cfr_compliance_mcp/models/__init__.py`
+
+**Verification performed this session:**
+- `py_compile`: passed.
+- `pydantic` could not be installed (no network access, confirmed via a real `pip install` attempt) — full `BaseModel` instantiation was not executed. Mitigated by extracting and directly testing every validator's actual logic body.
+- **Two real bugs caught and fixed:** (1) the shared date validator used a format-only regex, incorrectly accepting invalid calendar dates like `2026-13-40`; (2) switching to `date.fromisoformat` alone then incorrectly accepted basic-ISO-format-without-dashes (`20260101`). Fixed by combining an exact-shape check (`len==10`, dashes at positions 4/7) with `fromisoformat`. Regression-tested against 9 invalid-date cases plus valid cases — all passed after the fix.
+
+**Surgical patch to an already-complete file:** added a public `resolve_date()` wrapper to `clients/ecfr_client.py` (thin pass-through to the existing private `_resolve_date`), so the tool layer can obtain the concrete resolved date for citation metadata without reaching into a private method. Backward-compatible, no behavior change — verified `ecfr_client.py` still compiles after the patch.
+
+## Milestone 6 — Tools Layer (all 8 MCP tools)
+**Status:** Complete
+
+Files created:
+- `src/cfr_compliance_mcp/tools/_common.py` — shared internal helpers: `build_error_response` (exception → structured `ErrorResponse`), `cached_call` (cache-around-compute, fail-soft), `perform_search` (shared implementation backing both search tools)
+- `src/cfr_compliance_mcp/tools/search_regulations.py`, `search_by_keyword.py`, `retrieve_section.py`, `retrieve_part.py`, `retrieve_title.py`, `get_title_structure.py`, `get_version_history.py`, `list_agencies.py` — each a factory function `make_<tool>_tool(ecfr_client, cache) -> Callable`
+- `src/cfr_compliance_mcp/tools/__init__.py`
+
+**Verification performed this session:**
+- `py_compile`: passed for all 9 files.
+- `cached_call` integration-tested against the **real** `InMemoryCacheBackend` (not a mock): confirmed `compute()` runs exactly once per unique cache key, is correctly skipped on a hit, and different keys don't collide.
+- Defensive JSON-unwrapping logic in `get_version_history`, `list_agencies`, and `perform_search` extracted and tested against multiple shape variations, including hostile/unexpected input (`None`, wrong types, missing keys) — all handled without crashing.
+- AST-based static verification: confirmed exactly 8 factory functions defined across the tool files with no duplicates, matching the required tool list exactly.
+- **Real bug caught and fixed:** `search_regulations.py`'s cache-key construction originally passed a `tuple` into `build_cache_key`, violating its `str | int | None` parts contract. Fixed by joining sorted agency slugs into a deterministic string — sorting also makes the cache key order-independent as a bonus.
+- Full end-to-end tool invocation through Pydantic construction was **not** tested (pydantic unavailable) — disclosed, not hidden.
+
+## Milestone 7 — Server Entrypoint
+**Status:** Complete
+
+Files created:
+- `src/cfr_compliance_mcp/server.py` — `AppResources` dataclass, `create_app()` (builds the fully-wired FastMCP app without starting it, for testability), `main()` (console-script entrypoint), `_run()` (starts `HttpClient`, runs the server, guarantees `aclose()` via `finally`)
+
+**Verification performed this session:**
+- `py_compile`: passed.
+- `fastmcp` could not be installed (no network access) — the actual `FastMCP(...)`/`mcp.tool()`/`mcp.run_async(...)` calls are **not verified against a live install**. This is disclosed as the single highest-risk unverified piece in the entire project, flagged prominently in the module's own docstring.
+- AST-based static verification confirmed `server.py`'s `_TOOL_FACTORIES` list contains exactly the 8 required tools, matching `tools/__init__.py`'s exports with no omissions or duplicates.
+
+## Milestone 8 — Post-Completion Full Engineering Review
+**Status:** Complete — MCP SERVER IS NOW FULLY CODE-COMPLETE
+
+Performed a complete review across all 26 source files:
+- Traced the full internal import graph (via static grep + manual analysis): confirmed a clean DAG with no circular imports, matching `ARCHITECTURE.md` exactly. `server.py` is the only file importing `fastmcp`; no tool imports another tool.
+- Cross-referenced every tool's calls against actual `EcfrClient` method signatures, `parse_regulation_xml`'s signature, and every response model's field set — all consistent, no integration bugs.
+- Code-hygiene sweep: no bare `except:`, no debug `print()`, no `TODO`/`FIXME`/`XXX`, every non-`__init__` file has `from __future__ import annotations`, every module uses `get_logger(__name__)` consistently, every one of the 8 tools has exactly one outer `except Exception` boundary.
+- Confirmed all 4 previously-found-and-fixed bugs (2 date-validator, 1 XML-whitespace, 1 cache-key-tuple) remain fixed with no regression.
+- **No new defects found in this review.**
+
+Documentation fully synchronized this milestone: `PROJECT_HANDOFF.md`, `PROJECT_PROGRESS.md` (this file), `TEAM_LEAD_REPORT.md`, `ARCHITECTURE.md`, `README.md`.
 
 ---
 
@@ -87,10 +136,10 @@ See the PROJECT STATUS block at the end of this session's conversation for detai
 | Clients (`http_client`, `ecfr_client`, `__init__`) | 3 | Complete |
 | Cache (`cache_backend`, `__init__`) | 2 | Complete |
 | Parsing (`xml_parser`, `__init__`) | 2 | Complete |
-| Models (`requests`, `responses`, `__init__`) | 3 | Not started |
-| Tools (8 tool files + `__init__`) | 9 | Not started |
-| Server (`server.py`) | 1 | Not started |
+| Models (`requests`, `responses`, `__init__`) | 3 | Complete |
+| Tools (8 tool files + `_common` + `__init__`) | 10 | Complete |
+| Server (`server.py`) | 1 | Complete |
 | Tests | ~6+ | Not started |
-| **Total planned (MCP server only)** | **~34** | **15 complete (~44%)** |
+| **Total planned (MCP server only)** | **~35** | **29 complete (~83%)** — remaining is entirely the formal `pytest` suite |
 
 *Note: this count covers the MCP server package only. The expanded project scope (Contract Parser, Agno integration, Compliance Engine, `demo.py`, tests, docs) adds an as-yet-unscoped number of additional files in a separate sibling package — not included in the count above.*

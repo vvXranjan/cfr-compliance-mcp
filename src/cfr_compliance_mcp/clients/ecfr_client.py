@@ -134,6 +134,21 @@ class EcfrClient:
 
         return self._latest_date_cache[title]
 
+    async def resolve_date(self, title: int, date: str | None = None) -> str:
+        """Public wrapper around `_resolve_date`.
+
+        Added for the tool layer (built after this client): a tool like
+        `retrieve_section` needs to know the *concrete* date actually
+        used for a retrieval — to attach to the response's citation
+        metadata — even when the caller didn't pass one explicitly and
+        the date was auto-resolved. Calling the private `_resolve_date`
+        from outside this class would violate the module's own
+        encapsulation; this method is the sanctioned public entry point
+        for that need. Behavior is identical to `_resolve_date` — this
+        is purely a visibility change, not new logic.
+        """
+        return await self._resolve_date(title, date)
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------

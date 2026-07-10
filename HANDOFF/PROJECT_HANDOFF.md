@@ -47,11 +47,11 @@ cfr-compliance-mcp/
 │       ├── logging_config.py               ✅ complete
 │       ├── exceptions.py                   ✅ complete
 │       ├── constants.py                    ✅ complete
-│       ├── server.py                       ❌ not created yet
+│       ├── server.py                       ✅ complete
 │       ├── clients/
 │       │   ├── __init__.py                 ✅ complete
 │       │   ├── http_client.py               ✅ complete
-│       │   └── ecfr_client.py                ✅ complete
+│       │   └── ecfr_client.py                ✅ complete (patched: added public resolve_date())
 │       ├── cache/
 │       │   ├── __init__.py                 ✅ complete
 │       │   └── cache_backend.py             ✅ complete
@@ -59,19 +59,20 @@ cfr-compliance-mcp/
 │       │   ├── __init__.py                 ✅ complete
 │       │   └── xml_parser.py                ✅ complete
 │       ├── models/
-│       │   ├── __init__.py                 ❌ not created yet
-│       │   ├── requests.py                  ❌ not created yet
-│       │   └── responses.py                 ❌ not created yet
+│       │   ├── __init__.py                 ✅ complete
+│       │   ├── requests.py                  ✅ complete
+│       │   └── responses.py                 ✅ complete
 │       └── tools/
-│           ├── __init__.py                 ❌ not created yet
-│           ├── search_regulations.py        ❌ not created yet
-│           ├── retrieve_section.py           ❌ not created yet
-│           ├── retrieve_part.py              ❌ not created yet
-│           ├── retrieve_title.py             ❌ not created yet
-│           ├── get_title_structure.py        ❌ not created yet
-│           ├── search_by_keyword.py          ❌ not created yet
-│           ├── get_version_history.py        ❌ not created yet
-│           └── list_agencies.py              ❌ not created yet
+│           ├── __init__.py                 ✅ complete
+│           ├── _common.py                   ✅ complete (internal helper, not one of the 8)
+│           ├── search_regulations.py        ✅ complete
+│           ├── search_by_keyword.py         ✅ complete
+│           ├── retrieve_section.py           ✅ complete
+│           ├── retrieve_part.py              ✅ complete
+│           ├── retrieve_title.py             ✅ complete
+│           ├── get_title_structure.py        ✅ complete
+│           ├── get_version_history.py        ✅ complete
+│           └── list_agencies.py              ✅ complete
 └── tests/                                   ❌ not created yet (structure planned, no files)
     ├── __init__.py
     ├── conftest.py
@@ -102,24 +103,35 @@ cfr-compliance-mcp/
 | `src/cfr_compliance_mcp/cache/__init__.py` | Package marker; re-exports `CacheBackend`, `InMemoryCacheBackend`, `create_cache_backend`, `build_cache_key`. |
 | `src/cfr_compliance_mcp/parsing/xml_parser.py` | Converts raw eCFR XML (from `EcfrClient.retrieve_section/part/title`) into clean, LLM-readable plain text plus a structured `Citation` (title/part/section/date/heading/url). Tag-agnostic extraction via streaming `xml.etree.ElementTree.iterparse` + `elem.clear()` (bounds memory on large Title-level payloads; extracts direct text of every element in document order rather than hardcoding eCFR's paragraph tag names). Citation title/part/section/date are supplied by the caller (not scraped from the XML — the caller already knows what it requested); the section/part heading is the one thing pulled from the XML itself. Raises `XmlParsingError` on empty input, malformed XML, or well-formed XML with no extractable text. Functionally verified this session against realistic eCFR-shaped XML fixtures, including a real bug caught and fixed in self-review: source-XML line-wrapping was leaking into output paragraphs as stray line breaks, fixed via internal-whitespace collapsing. |
 | `src/cfr_compliance_mcp/parsing/__init__.py` | Package marker; re-exports `Citation`, `ParsedRegulation`, `parse_regulation_xml`. |
+| `src/cfr_compliance_mcp/models/requests.py` | Pydantic input-validation models, one per tool (with a shared `_TitleScopedRequest` base for the 4 title-scoped tools). `extra="forbid"` — an agent passing a typo'd parameter fails loudly. Two real bugs caught and fixed during functional testing of the shared `_validate_date` logic: (1) regex-only date checking accepted invalid calendar dates like `2026-13-40`; (2) switching to `date.fromisoformat` alone then accepted basic-ISO-format-without-dashes (`20260101`), not the documented `YYYY-MM-DD` shape. Fixed by combining an exact-shape check with `fromisoformat`. |
+| `src/cfr_compliance_mcp/models/responses.py` | Pydantic output models. `CitationModel` mirrors `parsing.Citation` (kept separate so the parsing layer stays free of a Pydantic dependency). Two-tier strictness: `_StrictResponse` (`extra="forbid"`) for shapes we fully control (`RegulationTextResponse`, `ErrorResponse`, etc.); `_PassthroughResponse` (`extra="allow"`) plus raw `dict[str, Any]` fields for shapes wrapping externally-controlled, not-live-verified eCFR JSON (`SearchResultItem`, `TitleStructureResponse.structure`, `VersionHistoryResponse.versions`, `AgenciesResponse.agencies`) — a deliberate, documented trade-off given no network access this session. |
+| `src/cfr_compliance_mcp/models/__init__.py` | Package marker; re-exports all request and response models. |
+| `src/cfr_compliance_mcp/tools/_common.py` | Internal (not one of the 8 public tools) shared helpers: `build_error_response` (translates any exception into the structured `ErrorResponse` shape — the single place this decision is made, not duplicated 8x), `cached_call` (the cache-around-compute pattern, fail-soft on cache errors — integration-tested this session against the real `InMemoryCacheBackend`, confirming `compute()` runs exactly once per unique key and is correctly skipped on a cache hit), and `perform_search` (shared implementation backing both search tools). |
+| `src/cfr_compliance_mcp/tools/search_regulations.py`, `search_by_keyword.py`, `retrieve_section.py`, `retrieve_part.py`, `retrieve_title.py`, `get_title_structure.py`, `get_version_history.py`, `list_agencies.py` | The 8 required MCP tools. Each is a **factory function** `make_<tool>_tool(ecfr_client, cache) -> Callable` (not a module-level function reading global state) — `server.py` calls each factory once at startup with the shared `EcfrClient`/`CacheBackend`, and registers the returned callable with FastMCP. Every tool: validates input via its `models.requests` model, builds a deterministic cache key via `cache.build_cache_key`, calls `cached_call`, and on any exception returns `build_error_response(exc)` rather than raising — no raw exception can reach the MCP transport layer. `get_version_history` and `list_agencies` defensively unwrap their eCFR JSON response shape (not live-verified) rather than assuming a fixed structure; this unwrapping logic was extracted and functionally tested against multiple shape variations including hostile/unexpected input. `search_regulations`/`search_by_keyword` intentionally converge on identical cache keys when their final query strings match, so equivalent searches share one cache entry. One real bug caught and fixed: `search_regulations.py`'s original cache-key construction passed a `tuple` into `build_cache_key`, violating its `str \| int \| None` parts contract — fixed by joining sorted agency slugs into a deterministic string. |
+| `src/cfr_compliance_mcp/tools/__init__.py` | Package marker; re-exports all 8 `make_*_tool` factory functions. |
+| `src/cfr_compliance_mcp/server.py` | FastMCP application entrypoint. `create_app()` builds the fully-wired app (settings → logging → shared `EcfrClient`/`CacheBackend` → all 8 tools registered) without starting the server, for testability. `main()` (the `uv run cfr-compliance-mcp` entry point) starts the `HttpClient`, runs the server via `mcp.run_async(...)` under `asyncio.run`, and guarantees `HttpClient.aclose()` via `try/finally` even on `KeyboardInterrupt`. **Disclosed risk:** the exact `fastmcp` API calls are written from documented v3.x patterns, not verified against a live install — `fastmcp` could not be installed in this offline sandbox. This is the single highest-risk unverified piece in the project; flagged prominently in the module's own docstring as the first thing to check once network access is available. |
 
 ## 6. Current Implementation Status
 
-**Completed:** Foundation layer (config, logging, exceptions, constants) + full clients layer (generic HTTP transport + eCFR-specific API client) + full cache layer (backend-agnostic interface + in-memory implementation + factory + key builder) + full parsing layer (raw XML → clean text + citation metadata). All files syntax-verified via `python3 -m py_compile`; the cache and parsing layers were additionally functionally verified at runtime this session (dependencies stubbed, since this sandbox has no network access to install them). **No live network testing against the real eCFR API has been done** — this sandbox has no network access, so `uv sync` / actual HTTP calls to `ecfr.gov` have not been executed. This must be the first thing done in a real dev environment.
+**The MCP server is code-complete.** All 7 layers are built: foundation (config, logging, exceptions, constants), clients (generic HTTP transport + eCFR-specific API client, plus a small backward-compatible patch adding a public `resolve_date()`), cache (backend-agnostic interface + in-memory implementation), parsing (raw XML → clean text + citations), models (Pydantic request/response validation), tools (all 8 MCP tools), and server.py (FastMCP entrypoint). All files syntax-verified via `python3 -m py_compile`. Functional verification was performed wherever possible without network access: cache layer (full CRUD + TTL), parsing layer (realistic eCFR XML fixtures, including a real whitespace bug caught and fixed), models layer (date-validator logic, where two real bugs were caught and fixed), and the tools layer's cache-integration behavior (verified against the real `InMemoryCacheBackend`) and defensive JSON-unwrapping logic (verified against multiple hostile input shapes).
 
-**Not started:** Pydantic request/response models, all 8 MCP tool files, the FastMCP server entrypoint, any tests, README.
+**What has NOT been verified, disclosed explicitly rather than glossed over:**
+- No live network call to the real eCFR API has been made (no network access in this sandbox).
+- `pydantic` could not be installed, so full `BaseModel` instantiation/validation (as opposed to the extracted validator logic) was not executed.
+- `fastmcp` could not be installed, so `server.py`'s actual FastMCP API calls are unverified against a live version.
 
-## 7. Pending Modules (in dependency order)
+**Not started:** formal `pytest` test suite (verification so far is ad hoc, not committed as reusable tests), README refinement/smoke-test, and everything in the expanded end-to-end scope (Contract Parser, Agno integration, Compliance Engine, `demo.py`).
 
-1. ~~`cache/cache_backend.py`~~ — **COMPLETE.**
-2. ~~`parsing/xml_parser.py`~~ — **COMPLETE.**
-3. **`models/requests.py`** + **`models/responses.py`** — Pydantic input validation models (one per tool) and structured output/citation models. Depends on `constants.py` for bounds. **Next module.**
-4. **`tools/*.py`** (8 files) — thin orchestration per tool: validate input (via `models.requests`) → check cache (via `cache_backend`) → call `EcfrClient` method → parse XML if applicable (via `xml_parser`) → shape output (via `models.responses`) → return structured JSON. Depends on all of the above.
-5. **`server.py`** — FastMCP app instance, registers all 8 tools, manages `HttpClient` lifecycle (start at boot, close at shutdown) via `create_ecfr_client()`, calls `configure_logging()` at startup, reads `mcp_transport` from `Settings` to choose stdio vs streamable-http. This is the final piece before the server is runnable.
-6. **`tests/`** — unit tests per module, especially `http_client`/`ecfr_client` (mocked via `pytest-httpx`) and `xml_parser` (real eCFR XML fixtures — informal versions of these fixtures were already exercised ad hoc this session; formalizing them into `pytest` cases is still pending).
-7. **`README.md`** — setup/run instructions (`uv sync`, `uv run cfr-compliance-mcp`).
+## 7. Pending Modules — MCP SERVER IS NOW CODE-COMPLETE
 
-**Planned, additive, not yet built (does not affect the MCP server's architecture):** per the expanded project brief, a new **sibling package** (outside `cfr_compliance_mcp/`) will eventually house the Contract Parser, Agno Team/Agent integration, Compliance Engine, and `demo.py` — these consume this MCP server as an MCP *client* and do not require any change to what's built so far. See `ARCHITECTURE.md` for the planned high-level shape.
+All 7 layers of the MCP server itself are complete: foundation, clients, cache, parsing, models, tools (8 tools), server.py. What remains before this component is "done" in the fullest sense:
+
+1. **`tests/`** — formal `pytest` suite. Verification so far this session has been thorough but ad hoc (inline functional scripts, not committed test files) — see Section 6 and the per-module notes below for exactly what was and wasn't verified.
+2. **Live network testing** against the real eCFR API — never yet performed, no network access in this build sandbox. This is the single most important remaining validation step.
+3. **Live `fastmcp` verification** — `server.py`'s exact API calls (`FastMCP(...)`, `mcp.tool()`, `mcp.run_async(...)`) are written from documented patterns, not verified against a live install. Flagged as the highest-risk unverified piece in the project (see `server.py`'s module docstring).
+4. **`README.md` refinement** — currently accurate but was written before `server.py` existed; running instructions should be smoke-tested once `uv sync` is possible.
+
+**Planned, additive, not yet started (does not affect the MCP server's architecture):** per the expanded project brief, a new **sibling package** will house the Contract Parser, Agno Team/Agent integration, Compliance Engine, and `demo.py`. See `ARCHITECTURE.md`.
 
 **Explicitly out of scope for this handoff:** Agno agent integration, clause extraction, compliance report generation. Work stops at a fully working, standalone MCP server.
 
@@ -136,13 +148,13 @@ clients/ecfr_client.py ──▶ http_client.py, constants.py, config.py, except
 
 cache/cache_backend.py ──▶ config.py, logging_config.py, exceptions.py  (DONE)
 parsing/xml_parser.py ──▶ exceptions.py, logging_config.py             (DONE)
-models/requests.py, responses.py ──▶ constants.py                      (planned, next)
+models/requests.py, responses.py ──▶ constants.py, parsing.Citation    (DONE)
 
 tools/*.py ──▶ clients/ecfr_client.py, cache/cache_backend.py,
                parsing/xml_parser.py, models/requests.py, models/responses.py,
-               exceptions.py, logging_config.py                        (planned)
+               exceptions.py, logging_config.py                        (DONE)
 
-server.py ──▶ everything above                                         (planned)
+server.py ──▶ everything above, plus fastmcp                           (DONE)
 ```
 
 ## 9. Important Architectural Decisions
@@ -253,24 +265,24 @@ Client-side only (eCFR publishes no official hard limit). `_RateLimiter` in `htt
 
 Per a team-lead request, a separate research pass evaluated whether an existing "Legal MCP" (referred to as "LCP") could replace this custom build. Findings: no single canonical "LCP" project exists in the ecosystem; the closest candidates (`open-legal-compliance-mcp`, `court-listener-mcp` and its Vaquill-AI fork, the commercial Vaquill AI MCP) were evaluated against CFR/eCFR support, official-API integration, tool-surface fit, and production readiness. **None call the official eCFR REST API directly** — they route through GovInfo, CourtListener's own mirror (subject to a restrictive 125-requests/day free-tier cap as of May 2026), or a proprietary indexed corpus of uncertain freshness. **Decision reaffirmed: continue building the custom MCP server (no change).** Full comparison table and reasoning preserved in this session's conversation history; not duplicated here to avoid document bloat, but should be copied into a standalone research addendum file if this decision is ever revisited.
 
-## 24. Expected MCP Tools (8, matching original requirement)
+## 24. MCP Tools — IMPLEMENTED (8/8, matching original requirement)
 
-| Tool | Backing `EcfrClient` method(s) |
-|---|---|
-| `search_regulations(query, ...)` | `search()` |
-| `search_by_keyword(keywords[], ...)` | `search()` (multi-term query formatting) |
-| `retrieve_section(title, part, section, date?)` | `retrieve_section()` |
-| `retrieve_part(title, part, date?)` | `retrieve_part()` |
-| `retrieve_title(title, date?)` | `retrieve_title()` |
-| `get_title_structure(title, date?)` | `get_structure()` |
-| `get_version_history(title, part?, section?, ...)` | `get_version_history()` |
-| `list_agencies()` | `list_agencies()` |
+| Tool | Backing `EcfrClient` method(s) | Factory function |
+|---|---|---|
+| `search_regulations(query, ...)` | `search()` | `make_search_regulations_tool` |
+| `search_by_keyword(keywords[], ...)` | `search()` (multi-term query formatting via `perform_search`) | `make_search_by_keyword_tool` |
+| `retrieve_section(title, part, section, date?)` | `retrieve_section()` | `make_retrieve_section_tool` |
+| `retrieve_part(title, part, date?)` | `retrieve_part()` | `make_retrieve_part_tool` |
+| `retrieve_title(title, date?)` | `retrieve_title()` | `make_retrieve_title_tool` |
+| `get_title_structure(title, date?)` | `get_structure()` | `make_get_title_structure_tool` |
+| `get_version_history(title, part?, section?, ...)` | `get_version_history()` | `make_get_version_history_tool` |
+| `list_agencies()` | `list_agencies()` | `make_list_agencies_tool` |
 
-Every tool must: validate input (Pydantic), check cache before hitting the network, call the matching `EcfrClient` method, parse XML if the response is XML, return structured JSON with citation metadata, and translate any exception into a structured error payload rather than raising to the MCP transport layer.
+Every tool: validates input via its `models.requests` model, checks cache (`cache.build_cache_key` + `cached_call`) before hitting the network, calls the matching `EcfrClient` method, parses XML via `parsing.parse_regulation_xml` where the response is XML, returns structured JSON (via `models.responses`) with citation metadata, and translates any exception into a structured `ErrorResponse` via `build_error_response` rather than raising to the MCP transport layer. All 8 factory functions are registered in `server.py`'s `_TOOL_FACTORIES` list, verified via AST inspection to contain exactly these 8 with no duplicates.
 
-## 25. Expected Agno Integration (future, out of scope for this handoff)
+## 25. Agno Integration (future — MCP server scope boundary unchanged)
 
-The Agno agent will connect to this MCP server as an MCP client, calling the 8 tools above per contract clause to retrieve relevant CFR text, then reasoning over (clause text + retrieved CFR text) to produce a compliance verdict with citation. No Agno-specific code exists yet and none should be written until the MCP server itself is complete and tested end-to-end (per explicit scope boundary: "stop before Agno integration").
+The Agno agent(s)/Team will connect to this MCP server as an MCP client, calling the 8 tools above per contract clause to retrieve relevant CFR text, then reasoning over (clause text + retrieved CFR text) to produce a compliance verdict with citation. No Agno-specific code exists yet, and per explicit instruction none should be written until this MCP server is fully reviewed and the milestone is reported — the MCP server is now code-complete, but Agno integration remains a deliberately separate next phase, planned as a sibling package (see `ARCHITECTURE.md`).
 
 ---
 
@@ -283,33 +295,44 @@ Completed
 - Research & architecture phase (Milestone 1)
 - Legal MCP / "LCP" research addendum (decision reaffirmed: no change)
 - Foundation layer: config.py, logging_config.py, exceptions.py, constants.py
-- Clients layer: http_client.py (generic), ecfr_client.py (eCFR-specific), clients/__init__.py
+- Clients layer: http_client.py (generic), ecfr_client.py (eCFR-specific, patched with public
+  resolve_date()), clients/__init__.py
 - Cache layer: cache_backend.py (CacheBackend ABC, InMemoryCacheBackend, create_cache_backend,
   build_cache_key), cache/__init__.py
-- Parsing layer: xml_parser.py (Citation, ParsedRegulation, parse_regulation_xml),
-  parsing/__init__.py
-- All files syntax-verified (py_compile); cache and parsing layers additionally functionally
-  verified at runtime this session (dependencies stubbed since sandbox has no network access
-  to install them); one real bug (source-XML whitespace leakage) caught and fixed in
-  self-review before sign-off
+- Parsing layer: xml_parser.py (Citation, ParsedRegulation, parse_regulation_xml), parsing/__init__.py
+- Models layer: requests.py (8 request models), responses.py (9 response models), models/__init__.py
+- Tools layer: all 8 MCP tools + _common.py shared helpers, tools/__init__.py
+- Server: server.py (FastMCP entrypoint, create_app()/main())
+- MCP SERVER IS NOW FULLY CODE-COMPLETE (all 7 layers)
+- Full engineering review performed post-completion: dependency graph traced and confirmed
+  clean (no cycles), every tool's call sites cross-referenced against actual method/model
+  signatures (all consistent), code-hygiene sweep (no bare excepts, no debug prints, no
+  TODO/FIXME, consistent logging/typing conventions) — no new issues found, all 4 previously
+  fixed bugs confirmed still fixed
 
 Pending
-- models/requests.py, models/responses.py
-- 8 tool files in tools/
-- server.py (FastMCP entrypoint)
-- tests/ (no formal pytest coverage yet — ad hoc functional verification only)
-- README.md
+- tests/ (no formal pytest coverage yet — verification so far is thorough but ad hoc: cache
+  layer full CRUD+TTL, parsing layer realistic XML fixtures, models date-validator logic,
+  tools cache-integration behavior against the real InMemoryCacheBackend, and defensive
+  JSON-unwrapping logic all functionally tested inline this session, but not committed as
+  reusable pytest files)
 - Live network testing against the real eCFR API (never yet performed — no network access in
   this sandbox)
-- (Later, per expanded scope) Contract Parser, Agno Team/Agent integration, Compliance Engine,
-  demo.py — planned as a separate sibling package, not yet started
+- Live fastmcp verification (server.py's exact API calls are written from documented v3.x
+  patterns, not verified against a live install — flagged as the single highest-risk
+  unverified piece in the project)
+- Live pydantic verification (full BaseModel instantiation/validation not executed; validator
+  logic was extracted and tested standalone instead)
+- (Next phase, per expanded scope) Contract Parser, Agno Team/Agent integration, Compliance
+  Engine, demo.py — planned as a separate sibling package, not yet started per explicit
+  instruction to stop after this milestone
 
 Next Module
-- models/requests.py + models/responses.py (depends on constants.py only — safe to build next)
+- Contract Parser (PDF/DOCX) — NOT started yet per explicit instruction to stop here first.
 
 Estimated % Complete
-- MCP Server build: ~50% complete (foundation + clients + cache + parsing done; models, tools,
-  server entrypoint, and all formal tests remain)
+- MCP Server build: 100% code-complete; ~90% production-confidence (the ~10% gap is entirely
+  the three disclosed live-verification gaps above — no known code defects)
 - Overall project (including Contract Parser, Agno integration, Compliance Engine, demo.py,
-  per the expanded final goal): ~18% complete
+  testing, final docs, per the expanded final goal): ~30% complete
 ```
