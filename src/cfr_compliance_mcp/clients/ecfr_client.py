@@ -121,6 +121,9 @@ class EcfrClient:
         documented by existing community eCFR tooling as the standard
         workaround for this quirk.
         """
+        if date == constants.SEARCH_DATE_CURRENT:
+            date = None
+
         if date is not None:
             return date
 

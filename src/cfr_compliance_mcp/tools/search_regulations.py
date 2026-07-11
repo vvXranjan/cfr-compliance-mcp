@@ -40,14 +40,18 @@ def make_search_regulations_tool(
     ) -> dict[str, Any]:
         """Full-text search across the CFR for a free-text query or phrase.
 
-        Defaults to only current, in-force regulation text (excludes
-        superseded historical matches) unless `date` is set otherwise.
-
         Args:
             query: free-text search query, e.g. "hazardous waste characteristics".
             agency_slugs: optional list of agency slugs to restrict the search to.
-            date: "current" (default) for in-force text only, an explicit
-                YYYY-MM-DD date, or None for all historical matches.
+            date: the sentinel "current" (default) for only in-force text
+                (excludes superseded historical matches), an explicit
+                YYYY-MM-DD date to scope results to content in force on
+                that date, or None for no date restriction at all — matches
+                from every historical version of the CFR are included,
+                which may return duplicate or superseded text alongside
+                current text. Callers that specifically want historical,
+                including superseded, matches should pass date=None
+                explicitly rather than relying on the default.
             per_page: results per page (1-100, default 20).
             page: page number (>= 1, default 1).
 
@@ -80,7 +84,7 @@ def make_search_regulations_tool(
 
         try:
             return await cached_call(cache, cache_key, settings.cache_ttl_seconds, compute)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 -- tool boundary: never leak raw exceptions to MCP transport
             return build_error_response(exc)
 
     return search_regulations
