@@ -17,6 +17,9 @@ dependencies = [
     "tenacity>=8.3",
     "python-dotenv>=1.0",
     "pypdf>=6.14.2",
+    "agno>=2.7.2",
+    "openai>=2.45.0",
+    "ollama>=0.6.2",
 ]
 
 [project.optional-dependencies]
