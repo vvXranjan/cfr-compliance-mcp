@@ -1,31 +1,3 @@
-# from pathlib import Path
-
-# from pypdf import PdfReader
-
-
-# class ContractParser:
-#     """Simple PDF contract parser."""
-
-#     def __init__(self, pdf_path: str | Path):
-#         self.pdf_path = Path(pdf_path)
-
-#     def extract_text(self) -> str:
-#         """Extract all text from the PDF."""
-
-#         reader = PdfReader(self.pdf_path)
-
-#         pages = []
-
-#         for page in reader.pages:
-#             text = page.extract_text() or ""
-#             pages.append(text)
-
-#         return "\n".join(pages)
-
-#     def page_count(self) -> int:
-#         """Return number of pages."""
-
-#         return len(PdfReader(self.pdf_path).pages)
 import re
 from pathlib import Path
 
@@ -40,9 +12,9 @@ from .models import Clause
 # One heading per line: optional leading whitespace, "SECTION" (any case),
 # a number, an optional period, then the heading text.
 _SECTION_HEADING_PATTERN = re.compile(
-    r"^[ \t]*SECTION\s+\d+\.?\s+.+$", re.MULTILINE | re.IGNORECASE
+    r"^[ \t]*(?:SECTION\s+\d+\.?|\d+\.\d+)\s+.+$",
+    re.MULTILINE | re.IGNORECASE,
 )
-
 
 class ContractParser:
     """Simple PDF contract parser."""

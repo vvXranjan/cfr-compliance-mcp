@@ -31,7 +31,8 @@ import json
 from typing import Any, Mapping, Optional
 
 from agno.agent import Agent
-from agno.models.ollama import Ollama
+# from agno.models.ollama import Ollama
+from agno.models.openai import OpenAIChat
 
 from .models import ComplianceResult
 
@@ -60,17 +61,19 @@ Evaluation process:
 4. Note any missing or conflicting requirements.
 5. Briefly explain the compliance risk, if any.
 
-Return ONLY the following structured fields:
+Return ONLY valid JSON.
 
-status:
-    One of: Compliant, Non-Compliant, Needs Review.
+Do not include markdown.
 
-confidence:
-    A number between 0.0 and 1.0 reflecting your confidence in the
-    status.
+Do not include explanations.
 
-reason:
-    A short, specific explanation for the decision.
+Use exactly this schema:
+
+{
+  "status": "Compliant",
+  "confidence": 0.95,
+  "reason": "..."
+}
 
 The application already knows the contract clause title. Do not
 infer, rename, rewrite, or otherwise modify it -- focus entirely on
@@ -92,7 +95,12 @@ class ComplianceAgent:
         """
         self.agent = Agent(
             name="CFR Compliance Reviewer",
-            model=model or Ollama(id="llama3.1"),
+            # model=model or Ollama(id="llama3.1"),
+            model=model or OpenAIChat(
+                id="nvidia/nemotron-3-super",
+                base_url="https://atm.accure.ai/v1",
+                api_key="atm_JIxbkUNzYqsRpRXlnSAnHUODVaIflcoQFa",
+            ),
             output_schema=ComplianceResult,
             instructions=[_COMPLIANCE_REVIEWER_INSTRUCTIONS],
         )
@@ -131,21 +139,16 @@ class ComplianceAgent:
         )
 
         response = self.agent.run(prompt)
-        result = self._parse_response(response.content)
+        print("\n" + "=" * 80)
+        print("RAW MODEL RESPONSE")
+        print("=" * 80)
+        print(response.content)
+        print("=" * 80 + "\n")
 
-        # The LLM's own clause_title is never trusted -- it sometimes
-        # echoes the CFR heading instead of the original contract clause
-        # title. The caller-supplied `clause_title` is always
-        # authoritative.
-        result.clause_title = clause_title
-
-        # Final safety-net clamp. Confidence should already be within
-        # [0, 1] by this point (either via the pre-validation clamp in
-        # `_parse_mapping`, or via ComplianceResult's own Field
-        # constraint when `response.content` arrived as an
-        # already-validated instance), but this guarantees the
-        # invariant regardless of which code path produced `result`.
-        result.confidence = _clamp_confidence(result.confidence)
+        result = self._parse_response(
+            response.content,
+            clause_title=clause_title,
+        )
 
         return result
 
@@ -196,7 +199,7 @@ compliance.
     # `output_schema`. Each shape is handled explicitly and safely; none
     # of them are allowed to fail silently.
 
-    def _parse_response(self, raw: Any) -> ComplianceResult:
+    def _parse_response(self, raw: Any, clause_title: str) -> ComplianceResult:
         """
         Dispatch `response.content` to the appropriate parser based on
         its runtime type.
@@ -205,19 +208,23 @@ compliance.
             RuntimeError: If `raw` cannot be turned into a
                 `ComplianceResult`.
         """
-        # Case A: already a validated ComplianceResult.
+        # Case A: already a validated ComplianceResult. The LLM's own
+        # clause_title is never trusted here either -- it sometimes
+        # echoes the CFR heading instead of the original contract
+        # clause title, so the caller-supplied value always wins.
         if isinstance(raw, ComplianceResult):
-            return raw
+            return raw.model_copy(update={"clause_title": clause_title})
+         
 
         # Case B: a plain dict or other Mapping.
         if isinstance(raw, Mapping):
-            return self._parse_mapping(raw, source="dict")
+            return self._parse_mapping(raw, clause_title=clause_title, source="dict")
 
         # Case C / D: a string, which may be a JSON object (Case C) or
         # arbitrary, non-JSON prose (Case D).
         if isinstance(raw, str):
             mapping = self._parse_json(raw)
-            return self._parse_mapping(mapping, source="JSON string")
+            return self._parse_mapping(mapping, clause_title=clause_title, source="JSON string")
 
         # Case E: anything else is an unexpected response shape.
         raise RuntimeError(
@@ -244,7 +251,7 @@ compliance.
             raise RuntimeError(
                 "Failed to parse the compliance agent's response into a "
                 "ComplianceResult: response was plain text, not JSON or "
-                f"a dict. Raw response (truncated): {raw[:200]!r}"
+                f"a dict. Raw response (truncated): {repr(raw)[:200]!r}"
             ) from exc
 
         if not isinstance(parsed, Mapping):
@@ -257,10 +264,22 @@ compliance.
         return parsed
 
     @staticmethod
-    def _parse_mapping(data: Mapping[str, Any], *, source: str) -> ComplianceResult:
+    def _parse_mapping(
+        data: Mapping[str, Any],
+        *,
+        clause_title: str,
+        source: str,
+    ) -> ComplianceResult:
         """
         Validate a mapping (from a dict response, or from decoding a
         JSON string response) into a `ComplianceResult`.
+
+        The LLM is only instructed to return `status`, `confidence`,
+        and `reason` -- `clause_title` is never part of its output, so
+        the caller-supplied `clause_title` is injected into the
+        candidate mapping here, before validation, rather than relying
+        on `ComplianceResult.model_validate()` to accept a mapping that
+        doesn't yet satisfy the model's required fields.
 
         Confidence is clamped *before* validation, not after:
         `ComplianceResult`'s `Field(ge=0.0, le=1.0)` constraint makes
@@ -273,6 +292,8 @@ compliance.
             RuntimeError: If the mapping fails schema validation.
         """
         candidate = dict(data)
+        candidate["clause_title"] = clause_title
+
         confidence = candidate.get("confidence")
         if isinstance(confidence, (int, float)):
             candidate["confidence"] = _clamp_confidence(float(confidence))

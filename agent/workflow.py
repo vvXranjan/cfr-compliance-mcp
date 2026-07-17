@@ -33,7 +33,7 @@ from .contract_parser import ContractParser, split_into_clauses
 
 def main():
 
-    pdf = Path("contracts/sample_contract.pdf")
+    pdf = Path("contracts/sample_contract_multi.pdf")
 
     parser = ContractParser(pdf)
 

@@ -7,16 +7,24 @@
 # hierarchy has no section), and return a `CfrMatch` pairing the clause
 # with its citation and regulation text.
 
-# Retrieval-only, by design: no LLM, no Agno, no scoring/ranking beyond
-# "trust eCFR's own search ranking and take result #1", no compliance
-# reasoning. Those are later pipeline stages, not this module's job.
+# Retrieval-only, by design: no LLM, no Agno, no compliance reasoning --
+# those are later pipeline stages, not this module's job. As of the
+# `cfr_query_optimizer` integration, this module *does* do one extra,
+# still fully deterministic step ahead of the MCP search call: run the
+# clause through `agent.cfr_query_optimizer.optimize_clause()` to build a
+# domain-anchored query and a predicted CFR title, and use that title as
+# a soft *preference* (never a hard filter) when picking which ranked
+# search hit to retrieve text for. eCFR's own search ranking is still the
+# thing being trusted for relevance within a title; the optimizer only
+# helps pick *which* title's hit to prefer when eCFR's ranking mixes
+# titles.
 
 # Run as: `uv run python -m agent.mcp_search` (package imports throughout,
 # per that invocation style).
 # """
 
 # from __future__ import annotations
-
+# import time
 # import asyncio
 # import json
 # import re
@@ -27,6 +35,7 @@
 # from fastmcp import Client
 # from fastmcp.client.transports import StdioTransport
 
+# from .cfr_query_optimizer import optimize_clause
 # from .contract_parser import ContractParser, split_into_clauses
 # from .models import Clause
 
@@ -50,6 +59,9 @@
 # # agent.mcp_search` actually connects and lists tools.
 # MCP_SERVER_COMMAND = "uv"
 # MCP_SERVER_ARGS = ["run", "python", "-m", "cfr_compliance_mcp.server"]
+# # Maximum concurrent retrieval requests.
+# # Prevents flooding the MCP server / eCFR API.
+# RETRIEVAL_SEMAPHORE = asyncio.Semaphore(4)
 
 
 # def _build_transport() -> StdioTransport:
@@ -185,6 +197,73 @@
 #     )
 
 
+# def _is_appendix_only(hierarchy: Any, part: str | None) -> bool:
+#     """True when a search hit is an appendix reference with no usable
+#     CFR part (`hierarchy.appendix` set, `hierarchy.part` absent).
+#     `retrieve_section`/`retrieve_part` have nothing to fetch for that
+#     shape, so such hits should be skipped in favor of the next
+#     ranked result rather than failing the clause outright."""
+#     return isinstance(hierarchy, dict) and hierarchy.get("appendix") not in (None, "") and not part
+
+
+# def _select_best_candidate(
+#     results: list[dict[str, Any]], predicted_title: str | None
+# ) -> tuple[str | None, str | None, str | None]:
+#     """Walk `results` in rank order exactly as before, collecting every
+#     *usable* candidate (has a numeric title + part, not an
+#     appendix-only reference) -- then pick the first usable candidate
+#     whose title matches `predicted_title`, if one was supplied by
+#     `cfr_query_optimizer` and at least one such candidate exists.
+#     Otherwise fall back to the first usable candidate overall (eCFR's
+#     own rank-1 usable hit), which is this pipeline's original,
+#     always-safe behavior.
+
+#     Never hard-fails on a title mismatch: `predicted_title` is a
+#     deterministic *hint*, not a filter that can eliminate every
+#     candidate. If nothing matches it, the original rank-order selection
+#     still applies -- this function always returns the same result the
+#     pre-optimizer pipeline would have when `predicted_title` is `None`
+#     or matches nothing.
+
+#     Example (matches the optimizer's own docstring example): predicted
+#     title "29", search hits ranked [48 CFR appendix-only, 40 CFR
+#     (usable, unrelated), 29 CFR 1926 (usable)] -> the appendix-only hit
+#     is skipped as before, and "29 CFR 1926" is preferred over the
+#     higher-ranked-but-off-domain "40 CFR" hit.
+#     """
+#     usable: list[tuple[str, str, str | None]] = []
+
+#     for candidate in results:
+#         if not isinstance(candidate, dict):
+#             continue
+
+#         c_title, c_part, c_section = _extract_hierarchy_ref(candidate)
+#         hierarchy = candidate.get("hierarchy")
+
+#         print("Search hit:")
+#         print(f"  title: {c_title}")
+#         print(f"  part: {c_part}")
+#         print(f"  section: {c_section}")
+#         print(f"  hierarchy: {hierarchy}")
+
+#         if _is_appendix_only(hierarchy, c_part):
+#             continue
+#         if c_title is None or c_part is None:
+#             continue
+
+#         usable.append((c_title, c_part, c_section))
+
+#     if not usable:
+#         return None, None, None
+
+#     if predicted_title is not None:
+#         for c_title, c_part, c_section in usable:
+#             if c_title == predicted_title:
+#                 return c_title, c_part, c_section
+
+#     return usable[0]
+
+
 # # ---------------------------------------------------------------------------
 # # Query normalization
 # # ---------------------------------------------------------------------------
@@ -198,7 +277,12 @@
 # # strip the heading, tokenize, drop stopwords, dedupe, cap length -- no
 # # NLP, no embeddings, no synonym expansion. It can only surface words
 # # already present in the clause; it won't invent domain terms the
-# # clause never used.
+# # clause never used. `cfr_query_optimizer.optimize_clause()` (see that
+# # module) runs *after* this function as a second, independent pass, and
+# # can override its output with a domain-anchored query when a CFR
+# # domain is confidently detected -- but never removes or weakens this
+# # function itself; `build_search_query`'s output remains the fallback
+# # whenever the optimizer finds no domain match.
 
 # # Matches a leading "SECTION 1." / "Section 2" style heading so it's
 # # stripped before tokenizing -- `split_into_clauses` already puts the
@@ -283,15 +367,6 @@
 #     return results or []
 
 
-# def _is_appendix_only(hierarchy: Any, part: str | None) -> bool:
-#     """True when a search hit is an appendix reference with no usable
-#     CFR part (`hierarchy.appendix` set, `hierarchy.part` absent).
-#     `retrieve_section`/`retrieve_part` have nothing to fetch for that
-#     shape, so such hits should be skipped in favor of the next
-#     ranked result rather than failing the clause outright."""
-#     return isinstance(hierarchy, dict) and hierarchy.get("appendix") not in (None, "") and not part
-
-
 # async def _retrieve_text(
 #     client: Client, title: int, part: str, section: str | None
 # ) -> tuple[str, str]:
@@ -323,47 +398,28 @@
 
 
 # async def retrieve_for_clause(client: Client, clause: Clause) -> CfrMatch:
-#     """Run the full Clause -> CFR retrieval pipeline for one clause.
-
-#     Never raises: search errors, empty results, missing/unusable
-#     hierarchy, and retrieval errors are all captured on
-#     `CfrMatch.error` so one bad clause doesn't stop the rest of the
-#     document.
-#     """
+#    async with RETRIEVAL_SEMAPHORE:
 #     try:
-#         query = build_search_query(clause)
-#         print(f"Search query: {query}")
+#         base_query = build_search_query(clause)
+#         optimized = optimize_clause(clause.title, clause.text, base_query)
+#         query = optimized["search_query"]
+#         predicted_title = optimized["title"]
+
+#         print(f"Base query: {base_query}")
+#         print(f"Optimized query: {query}")
+#         print(f"Predicted CFR title: {predicted_title}")
 
 #         results = await _search_results(client, query)
 #         if not results:
 #             return CfrMatch(clause=clause, error="No CFR search results found")
 
-#         # Walk results in rank order and take the first one with a
-#         # usable title/part -- not blindly `results[0]`, since a
-#         # higher-ranked hit may be an appendix-only reference (or
-#         # otherwise missing a part) that retrieve_section/retrieve_part
-#         # can't do anything with.
-#         title_str = part = section = None
-#         for candidate in results:
-#             if not isinstance(candidate, dict):
-#                 continue
-
-#             c_title, c_part, c_section = _extract_hierarchy_ref(candidate)
-#             hierarchy = candidate.get("hierarchy")
-
-#             print("Search hit:")
-#             print(f"  title: {c_title}")
-#             print(f"  part: {c_part}")
-#             print(f"  section: {c_section}")
-#             print(f"  hierarchy: {hierarchy}")
-
-#             if _is_appendix_only(hierarchy, c_part):
-#                 continue
-#             if c_title is None or c_part is None:
-#                 continue
-
-#             title_str, part, section = c_title, c_part, c_section
-#             break
+#         # Walk results in rank order and take the first usable one,
+#         # preferring a hit whose title matches the optimizer's
+#         # prediction (if any) over a higher-ranked but off-domain hit --
+#         # see `_select_best_candidate`'s own docstring. Falls back to
+#         # the original "first usable hit, in rank order" behavior when
+#         # `predicted_title` is None or matches nothing.
+#         title_str, part, section = _select_best_candidate(results, predicted_title)
 
 #         if title_str is None or part is None:
 #             return CfrMatch(
@@ -383,15 +439,27 @@
 #         return CfrMatch(clause=clause, error=str(exc))
 
 
+# # async def retrieve_for_clauses(clauses: list[Clause]) -> list[CfrMatch]:
+# #     """Run retrieval for every clause against one shared MCP session
+# #     (one subprocess/connection for the whole document, not one per
+# #     clause)."""
+# #     matches: list[CfrMatch] = []
+
+# #     async with Client(_build_transport()) as client:
+# #         for clause in clauses:
+# #             matches.append(await retrieve_for_clause(client, clause))
+
+# #     return matches
 # async def retrieve_for_clauses(clauses: list[Clause]) -> list[CfrMatch]:
-#     """Run retrieval for every clause against one shared MCP session
-#     (one subprocess/connection for the whole document, not one per
-#     clause)."""
-#     matches: list[CfrMatch] = []
+#     """Run retrieval for every clause against one shared MCP session."""
 
 #     async with Client(_build_transport()) as client:
-#         for clause in clauses:
-#             matches.append(await retrieve_for_clause(client, clause))
+#         tasks = [
+#             retrieve_for_clause(client, clause)
+#             for clause in clauses
+#         ]
+
+#         matches = await asyncio.gather(*tasks)
 
 #     return matches
 
@@ -417,7 +485,7 @@
 
 
 # async def _main_async() -> None:
-#     pdf_path = Path("contracts/sample_contract.pdf")
+#     pdf_path = Path("contracts/sample_contract_multi.pdf")
 #     parser = ContractParser(pdf_path)
 #     text = parser.extract_text()
 #     clauses = split_into_clauses(text)
@@ -440,10 +508,6 @@
 
 # if __name__ == "__main__":
 #     main()
-
-
-
-
 """agent/mcp_search.py
 
 Retrieval layer: for every contract Clause, search the CFR via the
@@ -470,7 +534,7 @@ per that invocation style).
 """
 
 from __future__ import annotations
-
+import time
 import asyncio
 import json
 import re
@@ -505,6 +569,9 @@ from .models import Clause
 # agent.mcp_search` actually connects and lists tools.
 MCP_SERVER_COMMAND = "uv"
 MCP_SERVER_ARGS = ["run", "python", "-m", "cfr_compliance_mcp.server"]
+# Maximum concurrent retrieval requests.
+# Prevents flooding the MCP server / eCFR API.
+RETRIEVAL_SEMAPHORE = asyncio.Semaphore(4)
 
 
 def _build_transport() -> StdioTransport:
@@ -841,67 +908,84 @@ async def _retrieve_text(
 
 
 async def retrieve_for_clause(client: Client, clause: Clause) -> CfrMatch:
-    """Run the full Clause -> CFR retrieval pipeline for one clause.
-
-    Pipeline (see module docstring for the optimizer's role):
-        build_search_query() -> optimize_clause() -> search_regulations()
-        -> _select_best_candidate() (rank order, preferring the
-        optimizer's predicted title) -> retrieve_section/retrieve_part
-
-    Never raises: search errors, empty results, missing/unusable
-    hierarchy, and retrieval errors are all captured on
-    `CfrMatch.error` so one bad clause doesn't stop the rest of the
-    document.
-    """
-    try:
-        base_query = build_search_query(clause)
-        optimized = optimize_clause(clause.title, clause.text, base_query)
-        query = optimized["search_query"]
-        predicted_title = optimized["title"]
-
-        print(f"Base query: {base_query}")
-        print(f"Optimized query: {query}")
-        print(f"Predicted CFR title: {predicted_title}")
-
-        results = await _search_results(client, query)
-        if not results:
-            return CfrMatch(clause=clause, error="No CFR search results found")
-
-        # Walk results in rank order and take the first usable one,
-        # preferring a hit whose title matches the optimizer's
-        # prediction (if any) over a higher-ranked but off-domain hit --
-        # see `_select_best_candidate`'s own docstring. Falls back to
-        # the original "first usable hit, in rank order" behavior when
-        # `predicted_title` is None or matches nothing.
-        title_str, part, section = _select_best_candidate(results, predicted_title)
-
-        if title_str is None or part is None:
-            return CfrMatch(
-                clause=clause,
-                error="No search result had a usable CFR title/part (all appendix-only or incomplete)",
-            )
-
+    # Limit concurrent retrieval requests to avoid overwhelming the MCP
+    # server and the eCFR API -- the entire retrieval body for this
+    # clause (search + text fetch) runs inside the semaphore so the
+    # concurrency cap applies to the full request, not just part of it.
+    start = time.perf_counter()
+    async with RETRIEVAL_SEMAPHORE:
+        # Performance benchmarking: measure per-clause retrieval time so
+        # slow clauses (or slow MCP/eCFR calls) are visible without a
+        # profiler. Always printed, even on failure, via `finally`.
+        # start = time.perf_counter()
         try:
-            title = int(title_str)
-        except ValueError:
-            return CfrMatch(clause=clause, error=f"Non-numeric CFR title in hierarchy: {title_str!r}")
+            base_query = build_search_query(clause)
+            optimized = optimize_clause(clause.title, clause.text, base_query)
+            query = optimized["search_query"]
+            predicted_title = optimized["title"]
 
-        citation, text = await _retrieve_text(client, title, part, section)
-        return CfrMatch(clause=clause, citation=citation, regulation_text=text)
+            print(f"Base query: {base_query}")
+            print(f"Optimized query: {query}")
+            print(f"Predicted CFR title: {predicted_title}")
 
-    except Exception as exc:  # noqa: BLE001 -- retrieval boundary: one clause must not kill the run
-        return CfrMatch(clause=clause, error=str(exc))
+            results = await _search_results(client, query)
+            if not results:
+                return CfrMatch(clause=clause, error="No CFR search results found")
+
+            # Walk results in rank order and take the first usable one,
+            # preferring a hit whose title matches the optimizer's
+            # prediction (if any) over a higher-ranked but off-domain hit --
+            # see `_select_best_candidate`'s own docstring. Falls back to
+            # the original "first usable hit, in rank order" behavior when
+            # `predicted_title` is None or matches nothing.
+            title_str, part, section = _select_best_candidate(results, predicted_title)
+
+            if title_str is None or part is None:
+                return CfrMatch(
+                    clause=clause,
+                    error="No search result had a usable CFR title/part (all appendix-only or incomplete)",
+                )
+
+            try:
+                title = int(title_str)
+            except ValueError:
+                return CfrMatch(clause=clause, error=f"Non-numeric CFR title in hierarchy: {title_str!r}")
+
+            citation, text = await _retrieve_text(client, title, part, section)
+            return CfrMatch(clause=clause, citation=citation, regulation_text=text)
+
+        except Exception as exc:  # noqa: BLE001 -- retrieval boundary: one clause must not kill the run
+            return CfrMatch(clause=clause, error=str(exc))
+        finally:
+            elapsed = time.perf_counter() - start
+            print(f"[Retrieval] {clause.title}: {elapsed:.2f}s")
 
 
 async def retrieve_for_clauses(clauses: list[Clause]) -> list[CfrMatch]:
-    """Run retrieval for every clause against one shared MCP session
-    (one subprocess/connection for the whole document, not one per
-    clause)."""
-    matches: list[CfrMatch] = []
+    """Run retrieval for every clause against one shared MCP session."""
+
+    # Performance benchmarking: measure wall-clock time for the whole
+    # batch (session setup + all concurrent clause retrievals).
+    start = time.perf_counter()
 
     async with Client(_build_transport()) as client:
-        for clause in clauses:
-            matches.append(await retrieve_for_clause(client, clause))
+        tasks = [
+            retrieve_for_clause(client, clause)
+            for clause in clauses
+        ]
+
+        matches = await asyncio.gather(*tasks)
+
+    elapsed = time.perf_counter() - start
+    successful = sum(1 for m in matches if not m.error)
+    failed = len(matches) - successful
+
+    print("=" * 60)
+    print("Retrieval Summary")
+    print(f"Successful : {successful}")
+    print(f"Failed     : {failed}")
+    print(f"Total Time : {elapsed:.2f}s")
+    print("=" * 60)
 
     return matches
 
@@ -927,7 +1011,7 @@ def _print_match(match: CfrMatch) -> None:
 
 
 async def _main_async() -> None:
-    pdf_path = Path("contracts/sample_contract.pdf")
+    pdf_path = Path("contracts/sample_contract_multi.pdf")
     parser = ContractParser(pdf_path)
     text = parser.extract_text()
     clauses = split_into_clauses(text)
@@ -950,4 +1034,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
