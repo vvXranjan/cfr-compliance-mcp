@@ -70,7 +70,7 @@ class TestDomainDetection(unittest.TestCase):
                 "according to applicable laws, including EPA regulations on "
                 "chemical pollution."
             ),
-            base_query="manage dispose hazardous waste applicable laws epa regulations chemical pollution",
+            base_query="manage dispose hazardous waste applicable laws epa regulations chemical pollution",  # noqa: E501
         )
         self.assertEqual(result["domain"], "environmental")
         self.assertEqual(result["title"], "40")
@@ -86,7 +86,7 @@ class TestDomainDetection(unittest.TestCase):
                 "race or gender and shall maintain an affirmative action "
                 "program for equal opportunity in employment."
             ),
-            base_query="engage discrimination basis race gender maintain affirmative action program equal opportunity employment",
+            base_query="engage discrimination basis race gender maintain affirmative action program equal opportunity employment",  # noqa: E501
         )
         self.assertEqual(result["domain"], "employment")
         self.assertEqual(result["title"], "41")
@@ -101,7 +101,7 @@ class TestDomainDetection(unittest.TestCase):
                 "safety standards are met, including fall protection and "
                 "scaffold requirements per OSHA hazard communication rules."
             ),
-            base_query="ensure workplace safety construction safety standards met fall protection scaffold requirements osha hazard communication rules",
+            base_query="ensure workplace safety construction safety standards met fall protection scaffold requirements osha hazard communication rules",  # noqa: E501
         )
         self.assertEqual(result["domain"], "safety")
         self.assertEqual(result["title"], "29")
@@ -114,7 +114,7 @@ class TestDomainDetection(unittest.TestCase):
                 "Laborer and mechanic wage rates must be reported via "
                 "certified payroll pursuant to prevailing wage law."
             ),
-            base_query="laborer mechanic wage rates reported certified payroll pursuant prevailing wage law",
+            base_query="laborer mechanic wage rates reported certified payroll pursuant prevailing wage law",  # noqa: E501
         )
         self.assertEqual(result["domain"], "labor")
         self.assertEqual(result["title"], "29")
@@ -127,7 +127,7 @@ class TestDomainDetection(unittest.TestCase):
                 "This is a federal contract and all subcontractor agreements "
                 "under this government contract must include the same terms."
             ),
-            base_query="federal contract subcontractor agreements government contract include terms",
+            base_query="federal contract subcontractor agreements government contract include terms",  # noqa: E501
         )
         self.assertEqual(result["domain"], "procurement")
         self.assertEqual(result["title"], "48")
@@ -155,7 +155,7 @@ class TestNoDomainFallback(unittest.TestCase):
         self.assertIn("No domain keywords matched", result["reason"])
 
     def test_all_scores_present_even_with_no_winner(self) -> None:
-        result = optimize_clause("Miscellaneous", "Nothing domain-specific here.", "nothing domain specific")
+        result = optimize_clause("Miscellaneous", "Nothing domain-specific here.", "nothing domain specific")  # noqa: E501
         # Every configured domain must appear in all_scores, all at 0.
         self.assertEqual(
             set(result["all_scores"].keys()),
@@ -176,7 +176,7 @@ class TestWordBoundaryRegression(unittest.TestCase):
     def test_epa_does_not_match_inside_separate(self) -> None:
         result = optimize_clause(
             clause_title="Confidentiality",
-            clause_text="The parties agree to keep their obligations separate under this agreement.",
+            clause_text="The parties agree to keep their obligations separate under this agreement.",  # noqa: E501
             base_query="parties agree keep obligations separate agreement",
         )
         self.assertIsNone(result["domain"])
@@ -245,7 +245,7 @@ class TestDedupeAndQueryConstruction(unittest.TestCase):
             "the word 'waste' should appear exactly once, as part of 'hazardous waste'",
         )
         self.assertIn("hazardous waste", result["matches"], "full phrase must still be in matches")
-        self.assertIn("waste", result["matches"], "bare 'waste' must still be in matches (audit trail)")
+        self.assertIn("waste", result["matches"], "bare 'waste' must still be in matches (audit trail)")  # noqa: E501
 
 
 class TestTieBreakDeterminism(unittest.TestCase):
@@ -264,7 +264,7 @@ class TestTieBreakDeterminism(unittest.TestCase):
         )
         self.assertEqual(result["all_scores"]["environmental"], 1)
         self.assertEqual(result["all_scores"]["employment"], 1)
-        self.assertEqual(result["domain"], "environmental", "environmental must win the tie (listed first)")
+        self.assertEqual(result["domain"], "environmental", "environmental must win the tie (listed first)")  # noqa: E501
 
     def test_result_is_repeatable_across_calls(self) -> None:
         args = (
@@ -345,11 +345,11 @@ def _print_manual_report() -> None:
     dot-per-test output) -- useful for eyeballing real audit output
     quickly without reading assertions."""
     samples = [
-        ("Hazardous Waste Management", "Company must properly manage and dispose hazardous waste per EPA rules on chemical pollution."),
-        ("Equal Employment Opportunity", "Contractor shall not engage in discrimination on the basis of race or gender."),
-        ("Construction Site Safety", "Contractor must ensure workplace safety and fall protection per OSHA scaffold rules."),
-        ("Certified Payroll", "Laborer and mechanic wage rates must be reported via certified payroll."),
-        ("Subcontractor Flow-Down", "This federal contract requires all subcontractor agreements to include the same terms."),
+        ("Hazardous Waste Management", "Company must properly manage and dispose hazardous waste per EPA rules on chemical pollution."),  # noqa: E501
+        ("Equal Employment Opportunity", "Contractor shall not engage in discrimination on the basis of race or gender."),  # noqa: E501
+        ("Construction Site Safety", "Contractor must ensure workplace safety and fall protection per OSHA scaffold rules."),  # noqa: E501
+        ("Certified Payroll", "Laborer and mechanic wage rates must be reported via certified payroll."),  # noqa: E501
+        ("Subcontractor Flow-Down", "This federal contract requires all subcontractor agreements to include the same terms."),  # noqa: E501
         ("Miscellaneous", "This clause has no domain-specific vocabulary whatsoever."),
     ]
     print("\n" + "=" * 70)

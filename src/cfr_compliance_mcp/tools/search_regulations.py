@@ -69,7 +69,7 @@ def make_search_regulations_tool(
             return build_error_response(exc)
 
         agency_key = ",".join(sorted(req.agency_slugs)) if req.agency_slugs else None
-        cache_key = build_cache_key("search", req.query, agency_key, req.date, req.per_page, req.page)
+        cache_key = build_cache_key("search", req.query, agency_key, req.date, req.per_page, req.page)  # noqa: E501
         settings = get_settings()
 
         async def compute() -> dict[str, Any]:

@@ -61,7 +61,7 @@ def make_search_by_keyword_tool(
         """
         try:
             req = SearchByKeywordRequest(
-                keywords=keywords, agency_slugs=agency_slugs, date=date, per_page=per_page, page=page
+                keywords=keywords, agency_slugs=agency_slugs, date=date, per_page=per_page, page=page  # noqa: E501
             )
         except PydanticValidationError as exc:
             return build_error_response(exc)

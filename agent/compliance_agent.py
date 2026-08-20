@@ -28,13 +28,14 @@ elsewhere.
 from __future__ import annotations
 
 import json
-from typing import Any, Mapping, Optional
+import os
+from typing import Any
 
+import httpx
 from agno.agent import Agent
-# from agno.models.ollama import Ollama
 from agno.models.openai import OpenAIChat
 
-from .models import ComplianceResult
+from .models import ComplianceResult, _clause_id_from_text
 
 # System instructions given to the compliance-review agent.
 #
@@ -61,6 +62,22 @@ Evaluation process:
 4. Note any missing or conflicting requirements.
 5. Briefly explain the compliance risk, if any.
 
+Evidence grounding rules (MANDATORY):
+- Every `evidence` entry MUST reference ONLY the provided CFR
+  regulation, never the contract clause.
+- `title` is the integer CFR title number (e.g. 40).
+- `part` and `section` are the CFR part/section numbers (e.g. "257" and
+  "257.3").
+- `text_span` MUST be a verbatim quote from the provided regulation
+  text.
+- `citation` is the human-readable citation, e.g. "40 CFR 257.3".
+- `date` is the regulation date only if it appears in the provided
+  regulation text; otherwise use "".
+- Never invent a title, part, section, citation, or quote that does not
+  appear in the provided regulation text.
+- If you cannot ground your decision in the provided regulation text,
+  return status "Needs Review" and evidence [].
+
 Return ONLY valid JSON.
 
 Do not include markdown.
@@ -72,7 +89,9 @@ Use exactly this schema:
 {
   "status": "Compliant",
   "confidence": 0.95,
-  "reason": "..."
+  "reason": "...",
+  "evidence": [{"title": 40, "part": "257", "section": "257.3",
+                "date": "", "text_span": "...", "citation": "40 CFR 257.3"}]
 }
 
 The application already knows the contract clause title. Do not
@@ -87,19 +106,19 @@ class ComplianceAgent:
     CFR regulation, using an LLM-backed Agno agent.
     """
 
-    def __init__(self, model: Optional[Any] = None) -> None:
+    def __init__(self, model: Any | None = None) -> None:
         """
         Args:
-            model: An Agno-compatible model instance. Defaults to
-                `Ollama(id="llama3.1")` when not provided.
+            model: An Agno-compatible model instance. Defaults to the
+                configured LLM (ATM/Nemotron via `ATM_API_KEY`) when not
+                provided.
         """
         self.agent = Agent(
             name="CFR Compliance Reviewer",
-            # model=model or Ollama(id="llama3.1"),
             model=model or OpenAIChat(
-                id="nvidia/nemotron-3-super",
-                base_url="https://atm.accure.ai/v1",
-                api_key="atm_JIxbkUNzYqsRpRXlnSAnHUODVaIflcoQFa",
+                id=_llm_model(),
+                base_url=_llm_base_url(),
+                api_key=_llm_api_key() or None,
             ),
             output_schema=ComplianceResult,
             instructions=[_COMPLIANCE_REVIEWER_INSTRUCTIONS],
@@ -128,9 +147,17 @@ class ComplianceAgent:
             A validated `ComplianceResult`.
 
         Raises:
-            RuntimeError: If the agent's response cannot be parsed or
-                validated into a `ComplianceResult`.
+            RuntimeError: If no LLM API key is configured, the API call
+                fails, or the response cannot be parsed/validated into a
+                `ComplianceResult`.
         """
+        api_key = _llm_api_key()
+        if not api_key:
+            raise RuntimeError(
+                "No LLM API key configured. Set ATM_API_KEY (or OPENAI_API_KEY) "
+                "to enable LLM-based compliance evaluation."
+            )
+
         prompt = self._build_prompt(
             clause_title=clause_title,
             clause_text=clause_text,
@@ -138,19 +165,172 @@ class ComplianceAgent:
             cfr_text=cfr_text,
         )
 
-        response = self.agent.run(prompt)
-        print("\n" + "=" * 80)
-        print("RAW MODEL RESPONSE")
-        print("=" * 80)
-        print(response.content)
-        print("=" * 80 + "\n")
+        # Send the prompt to the LLM via a direct HTTP request to the
+        # configured OpenAI-compatible endpoint (ATM/Nemotron by default).
+        url = f"{_llm_base_url()}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": _llm_model(),
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a federal contract compliance reviewer. "
+                        "Compare the contract clause against the provided CFR "
+                        "regulation and return ONLY valid JSON with exactly "
+                        "these fields: status (one of Compliant, "
+                        "Non-Compliant, Needs Review), confidence (0.0-1.0), "
+                        "reason (a short explanation), and evidence (an array "
+                        "of objects referencing ONLY the provided CFR "
+                        "regulation). Each evidence object has: title (integer "
+                        "CFR title, e.g. 40), part (e.g. '257'), section (e.g. "
+                        "'257.3'), date ('' unless the regulation text shows "
+                        "it), text_span (a verbatim quote FROM the provided "
+                        "regulation text, never the clause), citation (e.g. "
+                        "'40 CFR 257.3'). Never invent titles, citations, or "
+                        "quotes absent from the provided regulation text. If "
+                        "you cannot ground your decision in the provided "
+                        "regulation text, return status 'Needs Review' with "
+                        "evidence []. Do not include markdown or explanations."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0,
+            "response_format": {"type": "json_object"},
+        }
 
-        result = self._parse_response(
-            response.content,
-            clause_title=clause_title,
-        )
+        try:
+            with httpx.Client(timeout=60) as client:
+                resp = client.post(url, headers=headers, json=payload, timeout=60)
+                if resp.status_code != 200:
+                    raise RuntimeError(
+                        f"LLM API returned status {resp.status_code}: {resp.text[:200]}"
+                    )
+                data = resp.json()
+        except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"LLM API request failed: {exc}"
+            ) from exc
 
-        return result
+        try:
+            choices = data.get("choices") or []
+            if not choices:
+                raise RuntimeError("LLM API returned no choices")
+            raw = choices[0].get("message", {}).get("content")
+            if not isinstance(raw, str) or not raw.strip():
+                raise RuntimeError("LLM API returned an empty response")
+            parsed = json.loads(raw)
+            if not isinstance(parsed, dict):
+                raise RuntimeError("LLM API response was not a JSON object")
+        except (json.JSONDecodeError, RuntimeError) as exc:
+            raise RuntimeError(
+                f"Failed to parse the compliance agent's JSON response: {exc}"
+            ) from exc
+
+        # ------------------------------------------------------------------
+        # Validation into a strongly-typed ComplianceResult
+        # ------------------------------------------------------------------
+        # The caller-supplied title and the deterministic clause id always
+        # win over anything the LLM echoes -- the LLM has been known to
+        # echo the CFR heading instead of the contract clause title.
+        parsed["clause_title"] = clause_title
+        parsed["clause_id"] = _clause_id_from_text(clause_title, clause_text)
+
+        confidence = parsed.get("confidence")
+        if isinstance(confidence, (int, float)):
+            parsed["confidence"] = max(0.0, min(1.0, float(confidence)))
+
+        status = parsed.get("status")
+        if isinstance(status, str):
+            normalized = {
+                "compliant": "Compliant",
+                "non-compliant": "Non-Compliant",
+                "noncompliant": "Non-Compliant",
+                "needs review": "Needs Review",
+                "needs-review": "Needs Review",
+                "needs_review": "Needs Review",
+            }.get(status.strip().lower())
+            if normalized is not None:
+                parsed["status"] = normalized
+
+        if parsed.get("status") not in ("Compliant", "Non-Compliant", "Needs Review"):
+            parsed["status"] = "Needs Review"
+
+        if not isinstance(parsed.get("reason"), str) or not parsed["reason"].strip():
+            parsed["reason"] = "The LLM response omitted a reason; routed to human review."
+        else:
+            parsed["reason"] = parsed["reason"].strip()
+
+        evidence = parsed.pop("evidence", [])
+        parsed_evidence: list[Any] = []
+        for ev in evidence or []:
+            if isinstance(ev, dict):
+                parsed_evidence.append(self._coerce_evidence(ev))
+        parsed["evidence"] = parsed_evidence
+
+        try:
+            return ComplianceResult.model_validate(parsed)
+        except Exception as exc:
+            raise RuntimeError(
+                "Failed to parse the compliance agent's JSON response "
+                "into a ComplianceResult"
+            ) from exc
+
+    @staticmethod
+    def _coerce_evidence(ev: dict[str, Any]) -> dict[str, Any]:
+        """Coerce an LLM evidence dict into a schema-safe mapping.
+
+        The LLM has been observed echoing the clause title into
+        ``evidence[].title`` (which must be an int) and embedding whole
+        sentences in ``section``/``part``. This normalizes each field
+        defensively so a single malformed evidence item cannot sink the
+        entire evaluation; unparseable fields fall back to safe values.
+
+        Provenance rule (HITL/evidence grounding): the LLM describes the
+        passage it read but is never the authority for where the material
+        came from. Any ``source``/``retrieved_at``/``retrieval_method``/
+        ``version``/``confidence``/``date`` the LLM tries to include is
+        dropped here -- ``date`` is always reset to "" and the retrieval
+        layer injects the authoritative date/version afterward.
+        """
+        title = ev.get("title", 0)
+        try:
+            title_int = int(title)
+        except (TypeError, ValueError):
+            title_int = 0
+
+        part = ev.get("part")
+        if isinstance(part, (int, float)):
+            part = str(int(part))
+        elif not isinstance(part, str):
+            part = None
+
+        section = ev.get("section")
+        if isinstance(section, (int, float)):
+            section = str(int(section))
+        elif not isinstance(section, str):
+            section = None
+
+        text_span = ev.get("text_span", "")
+        if not isinstance(text_span, str):
+            text_span = str(text_span)
+
+        citation = ev.get("citation", "")
+        if not isinstance(citation, str):
+            citation = str(citation)
+
+        return {
+            "title": title_int,
+            "part": part,
+            "section": section,
+            "date": "",  # LLM never supplies the authoritative date; retrieval does
+            "text_span": text_span,
+            "citation": citation,
+        }
 
     @staticmethod
     def _build_prompt(
@@ -191,136 +371,32 @@ compliance.
 """
 
     # ------------------------------------------------------------------
-    # Response parsing
-    # ------------------------------------------------------------------
-    #
-    # `response.content` from the Agno agent may arrive in several
-    # shapes depending on the model backend and how well it honored
-    # `output_schema`. Each shape is handled explicitly and safely; none
-    # of them are allowed to fail silently.
-
-    def _parse_response(self, raw: Any, clause_title: str) -> ComplianceResult:
-        """
-        Dispatch `response.content` to the appropriate parser based on
-        its runtime type.
-
-        Raises:
-            RuntimeError: If `raw` cannot be turned into a
-                `ComplianceResult`.
-        """
-        # Case A: already a validated ComplianceResult. The LLM's own
-        # clause_title is never trusted here either -- it sometimes
-        # echoes the CFR heading instead of the original contract
-        # clause title, so the caller-supplied value always wins.
-        if isinstance(raw, ComplianceResult):
-            return raw.model_copy(update={"clause_title": clause_title})
-         
-
-        # Case B: a plain dict or other Mapping.
-        if isinstance(raw, Mapping):
-            return self._parse_mapping(raw, clause_title=clause_title, source="dict")
-
-        # Case C / D: a string, which may be a JSON object (Case C) or
-        # arbitrary, non-JSON prose (Case D).
-        if isinstance(raw, str):
-            mapping = self._parse_json(raw)
-            return self._parse_mapping(mapping, clause_title=clause_title, source="JSON string")
-
-        # Case E: anything else is an unexpected response shape.
-        raise RuntimeError(
-            "Failed to parse the compliance agent's response into a "
-            f"ComplianceResult: unexpected response.content type "
-            f"{type(raw).__name__!r}."
-        )
-
-    @staticmethod
-    def _parse_json(raw: str) -> Mapping[str, Any]:
-        """
-        Decode a JSON string into a mapping.
-
-        Raises:
-            RuntimeError: If `raw` is not valid JSON, or decodes to
-                something other than a JSON object.
-        """
-        try:
-            parsed = json.loads(raw)
-        except (TypeError, ValueError) as exc:
-            # Plain text that isn't JSON at all. There's no reliable way
-            # to recover structured fields from arbitrary prose, so this
-            # is a genuine parsing failure.
-            raise RuntimeError(
-                "Failed to parse the compliance agent's response into a "
-                "ComplianceResult: response was plain text, not JSON or "
-                f"a dict. Raw response (truncated): {repr(raw)[:200]!r}"
-            ) from exc
-
-        if not isinstance(parsed, Mapping):
-            raise RuntimeError(
-                "Failed to parse the compliance agent's response into a "
-                "ComplianceResult: JSON response did not decode to an "
-                f"object, got {type(parsed).__name__}."
-            )
-
-        return parsed
-
-    @staticmethod
-    def _parse_mapping(
-        data: Mapping[str, Any],
-        *,
-        clause_title: str,
-        source: str,
-    ) -> ComplianceResult:
-        """
-        Validate a mapping (from a dict response, or from decoding a
-        JSON string response) into a `ComplianceResult`.
-
-        The LLM is only instructed to return `status`, `confidence`,
-        and `reason` -- `clause_title` is never part of its output, so
-        the caller-supplied `clause_title` is injected into the
-        candidate mapping here, before validation, rather than relying
-        on `ComplianceResult.model_validate()` to accept a mapping that
-        doesn't yet satisfy the model's required fields.
-
-        Confidence is clamped *before* validation, not after:
-        `ComplianceResult`'s `Field(ge=0.0, le=1.0)` constraint makes
-        `model_validate()` raise on an out-of-range value rather than
-        clamp it, so a slightly-out-of-range LLM confidence has to be
-        fixed up here first, or the whole evaluation fails instead of
-        being clamped as intended.
-
-        Raises:
-            RuntimeError: If the mapping fails schema validation.
-        """
-        candidate = dict(data)
-        candidate["clause_title"] = clause_title
-
-        confidence = candidate.get("confidence")
-        if isinstance(confidence, (int, float)):
-            candidate["confidence"] = _clamp_confidence(float(confidence))
-
-        return ComplianceAgent._validate_result(candidate, source=source)
-
-    @staticmethod
-    def _validate_result(candidate: Mapping[str, Any], *, source: str) -> ComplianceResult:
-        """
-        Run final pydantic validation on a candidate mapping.
-
-        Raises:
-            RuntimeError: If validation fails, wrapping the original
-                exception for debuggability.
-        """
-        try:
-            return ComplianceResult.model_validate(candidate)
-        except Exception as exc:
-            raise RuntimeError(
-                f"Failed to parse the compliance agent's {source} response "
-                "into a ComplianceResult"
-            ) from exc
+# LLM configuration
+# ------------------------------------------------------------------
+#
+# The compliance agent talks to an OpenAI-compatible chat endpoint
+# (by default the ATM-hosted Nemotron service). Endpoint, model and
+# credential are environment-driven -- never hard-coded -- so the
+# same code can point at any compatible provider (ATM, OpenAI,
+# Ollama's OpenAI-compatible API, a local vLLM, ...) without edits.
+#
+# Preference order: ATM_API_KEY (ATM/Nemotron default endpoint)
+# falls back to OPENAI_API_KEY for a generic OpenAI-compatible host.
 
 
-def _clamp_confidence(confidence: float) -> float:
-    """Clamp a confidence value into the inclusive range [0.0, 1.0]."""
-    return max(0.0, min(1.0, confidence))
+def _llm_api_key() -> str | None:
+    """Return the configured LLM credential, or None if none is set."""
+    return os.getenv("ATM_API_KEY") or os.getenv("OPENAI_API_KEY") or None
+
+
+def _llm_base_url() -> str:
+    """Return the LLM endpoint base URL (default: ATM /v1 endpoint)."""
+    return os.getenv("ATM_BASE_URL", "https://atm.accure.ai/v1").rstrip("/")
+
+
+def _llm_model() -> str:
+    """Return the LLM model identifier (default: Nemotron 3 nano omni)."""
+    return os.getenv("ATM_MODEL", "nvidia/nemotron-3-nano-omni")
 
 
 def evaluate_compliance(
@@ -328,7 +404,7 @@ def evaluate_compliance(
     clause_text: str,
     cfr_citation: str,
     cfr_text: str,
-    model: Optional[Any] = None,
+    model: Any | None = None,
 ) -> ComplianceResult:
     """
     Convenience function used by the compliance pipeline.

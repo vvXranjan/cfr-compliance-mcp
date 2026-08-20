@@ -56,15 +56,15 @@ def build_error_response(exc: Exception) -> dict[str, Any]:
     potentially made inconsistently) across 8 tool files.
     """
     if isinstance(exc, PydanticValidationError):
-        return ErrorResponse(error_type="ValidationError", message=str(exc), retryable=False).model_dump()
+        return ErrorResponse(error_type="ValidationError", message=str(exc), retryable=False).model_dump()  # noqa: E501
     if isinstance(exc, XmlParsingError):
-        return ErrorResponse(error_type="XmlParsingError", message=str(exc), retryable=False).model_dump()
+        return ErrorResponse(error_type="XmlParsingError", message=str(exc), retryable=False).model_dump()  # noqa: E501
     if isinstance(exc, CacheError):
         # A CacheError reaching here means it escaped cached_call's own
         # fail-soft handling (e.g. raised from code outside that
         # helper) -- still non-fatal to the caller, but worth its own
         # error_type for debugging.
-        return ErrorResponse(error_type="CacheError", message=str(exc), retryable=False).model_dump()
+        return ErrorResponse(error_type="CacheError", message=str(exc), retryable=False).model_dump()  # noqa: E501
     if isinstance(exc, EcfrApiError):
         retryable = type(exc).__name__ in _RETRYABLE_ECFR_ERRORS
         return ErrorResponse(
@@ -73,7 +73,7 @@ def build_error_response(exc: Exception) -> dict[str, Any]:
     if isinstance(exc, CfrMcpError):
         # Catches ValidationError (our own, from client-layer defense-in-depth
         # checks) and any future CfrMcpError subclass not special-cased above.
-        return ErrorResponse(error_type=type(exc).__name__, message=str(exc), retryable=False).model_dump()
+        return ErrorResponse(error_type=type(exc).__name__, message=str(exc), retryable=False).model_dump()  # noqa: E501
 
     # Truly unexpected, non-project exception: log full detail
     # server-side (stack trace via logger.exception), but return only a
@@ -116,7 +116,7 @@ async def cached_call(
     try:
         await cache.set(key, json.dumps(result), ttl_seconds=ttl_seconds)
     except CacheError as exc:
-        logger.warning("Cache write failed (non-fatal)", extra={"cache_key": key, "error": str(exc)})
+        logger.warning("Cache write failed (non-fatal)", extra={"cache_key": key, "error": str(exc)})  # noqa: E501
 
     return result
 

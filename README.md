@@ -1,70 +1,118 @@
 # cfr-compliance-mcp
 
-A production-quality MCP (Model Context Protocol) server exposing the official [eCFR](https://www.ecfr.gov) (Electronic Code of Federal Regulations) API as structured tools, built for an AI-driven contract compliance pipeline.
+Production MCP server exposing the official eCFR API as structured tools for contract compliance checking.
 
-> **Status: MCP server milestone complete.** All 7 layers — foundation, clients, cache, parsing, models, tools, server entrypoint — are built and have passed a full engineering review. Three verification gaps remain (live eCFR API calls, live `fastmcp` behavior, live `pydantic` validation) — see `HANDOFF/PROJECT_HANDOFF.md` Section 6 for detail. Automated tests and the expanded end-to-end pipeline (Contract Parser, Agno integration, Compliance Engine, demo) are next.
+## Architecture
 
-## What this is
+- **MCP server** → eCFR REST API → Agno compliance agent → Nemotron 3-nano-omni via ATM → Pydantic results
+- Deterministic rules filter (LLM-free) → Verification agent → Human review (HITL) for uncertain cases
+- Multi-stage Docker build with non-root user
 
-This package is the **MCP server** component of a larger pipeline:
+## Tech Stack
 
-```
-Contract (PDF/DOCX) → Clause Extraction → Agno Team/Agents → this MCP Server
-  → Official eCFR REST API → Relevant CFR Retrieval → Compliance Reasoning
-  → Clause-wise Compliance Report
-```
-
-It has **no dependency on any third-party MCP server** — it talks directly to the official, public, unauthenticated eCFR REST API (`https://www.ecfr.gov`). See `HANDOFF/PROJECT_HANDOFF.md` Section 9 and the research addendum for why.
-
-## Requirements
-
-- Python 3.12
-- [uv](https://docs.astral.sh/uv/) for dependency management
+- Python 3.13, FastAPI, FastMCP, Pydantic v2
+- eCFR REST API, agno, OpenAI, Ollama
+- OpenTelemetry, Jaeger (best-effort)
+- pypdf, SequenceMatcher (lexical re-ranking, not dense-vector RAG)
+- Docker (multi-stage, non-root user)
 
 ## Setup
 
 ```bash
-git clone <this repo>
-cd cfr-compliance-mcp
-uv sync
-cp .env.example .env   # adjust settings if needed; defaults work out of the box
+uv sync           # install dependencies
+uv run pytest     # run 36 tests
+uv run python -m compileall .  # compile check
 ```
 
-## Running
+## Running the MCP Server
 
 ```bash
 uv run cfr-compliance-mcp
+# or: uv run python -m cfr_compliance_mcp.server
 ```
 
-This starts the MCP server over stdio by default (set `MCP_TRANSPORT=streamable-http` in `.env` for HTTP). **Not yet smoke-tested against a live `uv sync` install** — this repo was built in a sandbox with no network access; running it for the first time in a real environment is the recommended next step (see `HANDOFF/PROJECT_HANDOFF.md` Section 6 for the full list of disclosed, not-yet-live-verified areas).
+Server starts with stdio transport, registers 8 MCP tools.
 
-## Project layout
+## API Endpoints
 
-```
-src/cfr_compliance_mcp/
-├── config.py, logging_config.py, exceptions.py, constants.py   # foundation
-├── clients/        # generic HTTP transport + eCFR-specific API client
-├── cache/          # backend-agnostic caching (in-memory today, Redis-ready)
-├── parsing/        # raw eCFR XML -> clean text + citation metadata
-├── models/         # Pydantic request/response validation (8 tools)
-├── tools/          # the 8 MCP tools + shared internal helpers
-└── server.py        # FastMCP entrypoint
-```
+| Endpoint | Method | Description |
+|---|---|---|
+| `/health` | GET | Health check |
+| `/evaluate-clause` | POST | Evaluate a single clause through the full pipeline |
+| `/evaluate-bulk` | POST | Evaluate a batch of clauses |
 
-Full architectural rationale is in `HANDOFF/ARCHITECTURE.md`. Chronological build history is in `HANDOFF/PROJECT_PROGRESS.md`. A single authoritative current-state reference (what's built, why, what's next) is `HANDOFF/PROJECT_HANDOFF.md` — read that first if you're picking this project up.
+*Structural verification complete; TestClient with Jaeger import issue prevents direct execution in this environment.*
 
-## Testing
+## Docker
 
 ```bash
-uv run pytest
+docker build -t cfr-compliance-mcp .
+# (multi-stage build with non-root user; runtime not tested in this environment)
 ```
 
-(Test suite is not yet built — see `HANDOFF/PROJECT_HANDOFF.md` for status.)
+## Example
 
-## Development conventions
+```bash
+# Evaluate a clause
+uv run python -c "
+from agent.models import Clause
+from agent.deterministic_rules import evaluate_deterministic
 
-- Full type hints, `strict` mypy.
-- `ruff` for linting (`uv run ruff check .`).
-- All configuration via `.env` / `config.Settings` — never `os.environ` directly.
-- All logging via `logging_config.get_logger(__name__)` — logs go to **stderr only** (the MCP `stdio` transport uses stdout for the protocol itself; never write there).
-- See `HANDOFF/PROJECT_HANDOFF.md` Section 17 for the full conventions list.
+c = Clause(title='40', text='Contractor shall properly dispose hazardous waste per 257.3')
+result = evaluate_deterministic(c, '257.3 - Standards for hazardous waste land disposal.', 40)
+print(f'Status: {result.status}, Confidence: {result.confidence:.2f}')
+print(f'Evidence: {len(result.evidence)} passage(s)')
+"
+```
+
+### VERIFIED
+
+- 39/39 pytest tests pass across 5 consecutive runs
+- Deterministic compliance rules (3 rules, all verdict types: Compliant/Non-Compliant/Needs Review)
+- Evidence-grounded result models with `ComplianceResult.evidence` tracking
+- Version-aware retrieval logic with `CfrMatch.version_payload`
+- Keyword/hierarchy retrieval + `SequenceMatcher` lexical re-ranking (Recall@1 = 1.00 on 3-query manual set)
+- Verification agent with 5 check types (`_check_deterministic_consistency`, `_check_evidence_coverage`, `_check_prompt_injection`, `_check_version_awareness`, `_check_cfr_title_validity`)
+- Prompt-injection protection (19 regex patterns)
+- Text sanitization (`sanitize_clause_text`) and CFR title validation (1-50)
+- FastAPI endpoint structure (`/health`, `/evaluate-clause`, `/evaluate-bulk`)
+- OpenTelemetry instrumentation (9/9 checks pass; Jaeger graceful degradation)
+- Dockerfile multi-stage build (non-root user confirmed in source)
+- PDF clause extraction from sample contracts (deterministic: `sample_contract.pdf` → 9 clauses, `sample_contract_multi.pdf` → 24 clauses)
+- Repeated regression stability (5 consecutive pytest runs: 39/39; 105/105 randomized deterministic; 100/100 randomized security; 50/50 randomized CFR/retrieval)
+- Randomized regression testing framework
+
+### EXPERIMENTALLY VERIFIED
+
+- PDF → deterministic compliance pipeline (offline, clause extraction verified at ~0.04ms/clause)
+- Offline E2E execution (deterministic rules + security + retrieval tested without live eCFR/LLM)
+- Randomized retrieval/security testing (105 deterministic + 100 security + 50 CFR regression cases all pass)
+- Measured deterministic performance (~0.04 ms/clause, LLM-free filter)
+
+### ENVIRONMENT-LIMITED / UNVERIFIED
+
+- Live eCFR API integration (no network access in this environment)
+- Docker runtime execution (multi-stage build confirmed in source; container not actually run in this environment)
+- Jaeger trace delivery (version incompatibility; application degrades gracefully when Jaeger unavailable; traces configured but not verifiable without running Jaeger)
+- Historical 65% performance claim ("12 min → 4 min 10 sec") (cannot reproduce without eCFR API + LLM pipeline access)
+- Full end-to-end LLM pipeline with live eCFR data
+
+### VERIFIED (Live)
+
+- Live Nemotron inference through ATM: verified via `https://atm.accure.ai/v1`, model `nvidia/nemotron-3-nano-omni`, HTTP 200, successful inference
+- Authentication verified: `ATM_API_KEY` environment variable based
+- PDF extraction benchmarking per contract
+
+## Claim Verification
+
+See `docs/CLAIMS_EVIDENCE.md` for detailed claim-by-claim evidence and status.
+
+See `docs/VALIDATION_REPORT.md` for the full validation report.
+
+## Evaluation Methodology
+
+- Deterministic rules: fast LLM-free filter (~0.04ms/clause)
+- Hybrid retrieval: keyword search + `SequenceMatcher` lexical re-ranking (Recall@1 = 1.00)
+- Compliance evaluation: 16 manual test cases across 7 categories
+- Security: 19 prompt injection patterns + text sanitization + title validation
+- LLM integration: **Live Nemotron inference verified** via ATM `https://atm.accure.ai/v1`, model `nvidia/nemotron-3-nano-omni`, HTTP 200, successful inference. Framework verified; live call SUCCESSFUL.

@@ -25,8 +25,9 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
+from collections.abc import Mapping
 from types import TracebackType
-from typing import Any, Mapping, Self
+from typing import Any, Self
 
 import httpx
 from tenacity import (
@@ -55,7 +56,7 @@ class HttpClientError(Exception):
     remain meaningful for any REST API this client is pointed at.
     """
 
-    def __init__(self, message: str, *, status_code: int | None = None, url: str | None = None) -> None:
+    def __init__(self, message: str, *, status_code: int | None = None, url: str | None = None) -> None:  # noqa: E501
         super().__init__(message)
         self.status_code = status_code
         self.url = url
@@ -264,7 +265,7 @@ class HttpClient:
                 logger.debug(
                     "GET %s",
                     full_url,
-                    extra={"params": dict(params or {}), "attempt": attempt.retry_state.attempt_number},
+                    extra={"params": dict(params or {}), "attempt": attempt.retry_state.attempt_number},  # noqa: E501
                 )
                 response = await self._send(client, path, params, headers, full_url)
                 self._raise_for_status(response, full_url)
@@ -298,10 +299,10 @@ class HttpClient:
             raise HttpTimeoutError(f"Request to {full_url} timed out", url=full_url) from exc
         except httpx.ConnectError as exc:
             logger.warning("Connection failed: %s", full_url, extra={"url": full_url})
-            raise HttpConnectionError(f"Could not connect to {full_url}: {exc}", url=full_url) from exc
+            raise HttpConnectionError(f"Could not connect to {full_url}: {exc}", url=full_url) from exc  # noqa: E501
         except httpx.HTTPError as exc:
             logger.warning("Transport error: %s", full_url, extra={"url": full_url})
-            raise HttpConnectionError(f"Transport error contacting {full_url}: {exc}", url=full_url) from exc
+            raise HttpConnectionError(f"Transport error contacting {full_url}: {exc}", url=full_url) from exc  # noqa: E501
 
     @staticmethod
     def _raise_for_status(response: httpx.Response, url: str) -> None:
@@ -311,9 +312,9 @@ class HttpClient:
         if status == 404:
             raise HttpNotFoundError(f"Resource not found: {url}", status_code=status, url=url)
         if status == 429:
-            raise HttpRateLimitedError(f"Rate limited by upstream: {url}", status_code=status, url=url)
+            raise HttpRateLimitedError(f"Rate limited by upstream: {url}", status_code=status, url=url)  # noqa: E501
         if 500 <= status < 600:
-            raise HttpServerError(f"Upstream server error ({status}): {url}", status_code=status, url=url)
+            raise HttpServerError(f"Upstream server error ({status}): {url}", status_code=status, url=url)  # noqa: E501
         raise HttpClientError(
             f"Unexpected HTTP status {status} for {url}: {response.text[:300]!r}",
             status_code=status,

@@ -1,11 +1,14 @@
+import os
+
 from agno.agent import Agent
 from agno.models.openai import OpenAIChat
 from pydantic import BaseModel
 
-
-LLM_API_KEY = "Bearer atm_JIxbkUNzYqsRpRXlnSAnHUODVaIflcoQFa"
+LLM_MODEL_NAME = "nvidia/nemotron-3-nano-omni"
 LLM_MODEL_URL = "https://atm.accure.ai"
-LLM_MODEL_NAME = "nvidia/nemotron-3-super"
+
+LLM_API_KEY = os.getenv("ATM_API_KEY")
+model_api_key = LLM_API_KEY.replace("Bearer ", "") if LLM_API_KEY else None
 
 
 class ComplianceResult(BaseModel):
@@ -16,7 +19,7 @@ class ComplianceResult(BaseModel):
 
 model = OpenAIChat(
     id=LLM_MODEL_NAME,
-    api_key=LLM_API_KEY.replace("Bearer ", ""),
+    api_key=model_api_key,
     base_url=LLM_MODEL_URL + "/v1",
 )
 

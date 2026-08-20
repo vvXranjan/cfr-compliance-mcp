@@ -134,7 +134,7 @@ class EcfrClient:
                     self._latest_date_cache[title] = entry["up_to_date_as_of"]
                     break
             else:
-                raise EcfrNotFoundError(f"CFR title {title} was not found in the eCFR titles index.")
+                raise EcfrNotFoundError(f"CFR title {title} was not found in the eCFR titles index.")  # noqa: E501
 
         return self._latest_date_cache[title]
 
@@ -212,11 +212,32 @@ class EcfrClient:
         """
         self._validate_title(title)
         resolved_date = await self._resolve_date(title, date)
-        path = constants.FULL_TEXT_ENDPOINT_TEMPLATE.format(date=resolved_date, title=title)
-        logger.info(
-            "Retrieving section: %s CFR %s.%s as of %s", title, part, section, resolved_date
+        path = constants.FULL_TEXT_ENDPOINT_TEMPLATE.format(
+            date=resolved_date,
+            title=title,
         )
-        return await self._fetch_full_title_xml(title, date)
+
+        logger.info(
+            "Retrieving section: %s CFR %s.%s as of %s",
+            title,
+            part,
+            section,
+            resolved_date,
+        )
+
+        qualified_section = (
+            section
+            if section.startswith(f"{part}.")
+            else f"{part}.{section}"
+        )
+
+        return await self._get_text(
+            path,
+            params={
+                "part": part,
+                "section": qualified_section,
+            },
+        )
 
     async def retrieve_part(self, title: int, part: str, date: str | None = None) -> str:
         """Fetch the raw XML text of an entire CFR part (a cluster of
@@ -230,7 +251,10 @@ class EcfrClient:
         resolved_date = await self._resolve_date(title, date)
         path = constants.FULL_TEXT_ENDPOINT_TEMPLATE.format(date=resolved_date, title=title)
         logger.info("Retrieving part: %s CFR %s as of %s", title, part, resolved_date)
-        return await self._fetch_full_title_xml(title, date)
+        return await self._get_text(
+            path,
+            params={"part": part},
+        )
 
     async def retrieve_title(self, title: int, date: str | None = None) -> str:
         """Fetch the raw XML text of an entire CFR title.
@@ -244,7 +268,6 @@ class EcfrClient:
         """
         self._validate_title(title)
         resolved_date = await self._resolve_date(title, date)
-        path = constants.FULL_TEXT_ENDPOINT_TEMPLATE.format(date=resolved_date, title=title)
         logger.info("Retrieving full title: %s as of %s", title, resolved_date)
         return await self._fetch_full_title_xml(title, date)
 

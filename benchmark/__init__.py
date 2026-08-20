@@ -1,0 +1,1 @@
+"""Reproducible benchmark harness for the compliance pipeline."""
