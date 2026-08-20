@@ -25,9 +25,8 @@ IMPORTANT -- these are SYNTHETIC numbers:
     LLM. They are NOT production latency and must not be labeled as such.
 
 The historical LIVE measurement (~12 min sequential -> ~4 min 10 s
-optimized, ~65% reduction) is documented as a historical/hot-unverifiable
-claim in docs/VALIDATION_REPORT.md. This harness does NOT reproduce it and
-does not claim to.
+optimized, ~65% reduction) is documented as a historical/unverifiable
+claim. This harness does NOT reproduce it and does not claim to.
 """
 
 from __future__ import annotations
@@ -341,8 +340,8 @@ def format_report(report: BenchmarkReport) -> str:
         "-" * 72,
         "  NOTE: SYNTHETIC numbers from a deterministic stub LLM. NOT real",
         "  production latency. The historical live measurement (~12 min ->",
-        "  ~4 min 10 s, ~65% reduction) is documented separately in",
-        "  docs/VALIDATION_REPORT.md and is not reproduced by this harness.",
+        "  ~4 min 10 s, ~65% reduction) is documented separately and is not",
+        "  reproduced by this harness.",
         "=" * 72,
     ]
     return "\n".join(lines)

@@ -74,10 +74,9 @@ __all__ = [
 ]
 
 # Every tool factory this server registers. Order matches the
-# originally-specified tool list in PROJECT_HANDOFF.md Section 24 --
-# kept as an explicit, reviewable list (rather than discovered via
-# reflection/introspection) so adding or removing a tool is a one-line,
-# obviously-visible change here.
+# originally-specified tool list -- kept as an explicit, reviewable
+# list (rather than discovered via reflection/introspection) so adding
+# or removing a tool is a one-line, obviously-visible change here.
 _TOOL_FACTORIES = [
     make_search_regulations_tool,
     make_search_by_keyword_tool,

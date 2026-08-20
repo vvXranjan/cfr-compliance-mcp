@@ -7,8 +7,8 @@ Architecture summary:
       read cleanly, plus a citation object the eventual compliance
       report needs for its audit trail.
     - This module makes **no network calls** and knows **nothing about
-      caching** — it is a pure transformation, matching the dependency
-      graph in `PROJECT_HANDOFF.md` (depends only on `exceptions.py` and
+      caching** — it is a pure transformation, matching the package's
+      layered dependency structure (depends only on `exceptions.py` and
       `logging_config.py`).
     - Citation values (title/part/section/date) are **passed in
       explicitly by the caller**, not scraped from the XML. The caller

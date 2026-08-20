@@ -9,7 +9,7 @@ Architecture summary:
       network call, cache lookup, or XML parsing happens.
     - Depends only on `constants.py` (for CFR title bounds and search
       defaults) — no dependency on `clients`, `cache`, or `parsing`,
-      matching the dependency graph in `PROJECT_HANDOFF.md`.
+      matching the package's layered dependency structure.
     - `extra="forbid"` on every request model: these are *our* tool
       contracts, not externally-controlled schemas, so an agent passing
       an unrecognized/typo'd parameter should fail loudly rather than

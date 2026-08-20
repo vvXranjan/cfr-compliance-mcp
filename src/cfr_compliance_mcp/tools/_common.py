@@ -6,14 +6,13 @@ here rather than duplicated 8 times. Two responsibilities:
 
     1. `build_error_response`: translate any exception raised anywhere
        in a tool's execution into the structured `ErrorResponse` JSON
-       shape, per the error-handling strategy in `PROJECT_HANDOFF.md`
-       Section 18. No tool should ever let a raw exception escape to
-       the MCP transport layer.
+       shape, per the package's error-handling strategy. No tool should
+       ever let a raw exception escape to the MCP transport layer.
     2. `cached_call`: the standard "check cache, compute on miss, write
        back" pattern every retrieval tool uses, with cache failures
-       treated as non-fatal (fail soft) per the caching strategy in
-       `PROJECT_HANDOFF.md` Section 22 — the cache is a performance
-       optimization, never a correctness dependency.
+       treated as non-fatal (fail soft) per the package's caching
+       strategy — the cache is a performance optimization, never a
+       correctness dependency.
     3. `perform_search`: the shared search implementation backing both
        `search_regulations` and `search_by_keyword`, since both tools
        ultimately do the same thing (call `EcfrClient.search()` and

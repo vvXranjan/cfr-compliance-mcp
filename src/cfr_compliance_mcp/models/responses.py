@@ -177,8 +177,7 @@ class AgenciesResponse(_StrictResponse):
 
 class ErrorResponse(_StrictResponse):
     """Structured error payload every tool returns instead of raising —
-    see `PROJECT_HANDOFF.md` Section 18 (Error Handling Strategy) and
-    `tools/_common.py`'s `build_error_response`, which is the sole
+    see `tools/_common.py`'s `build_error_response`, which is the sole
     place this model is constructed."""
 
     error: bool = True

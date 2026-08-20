@@ -201,9 +201,9 @@ docker run --rm -p 8000:8000 -e ATM_API_KEY=... cfr-compliance-mcp
 
 ## Evaluation & Validation
 
-See `docs/CLAIMS_EVIDENCE.md` for claim-by-claim evidence and
-`docs/VALIDATION_REPORT.md` for the validation report, and
-`docs/HANDOFF.md` for operational handoff details.
+- 139 tests pass (130 offline + 9 live LLM tests, which require `ATM_API_KEY`)
+- `ruff check .` — clean
+- Docker build and runtime verified (`/health` and `/evaluate-clause`)
 
 ## Known limitations
 

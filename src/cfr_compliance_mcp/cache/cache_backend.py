@@ -231,10 +231,9 @@ def create_cache_backend(settings: Settings | None = None) -> CacheBackend:
     `CACHE_BACKEND=redis` -> intentionally raises `CacheError` rather
     than silently falling back to in-memory. A Redis-backed
     implementation is a documented future upgrade (see
-    `exceptions.CacheError` usage here and Section 22 of
-    `PROJECT_HANDOFF.md`) — when it's built, it should be added as a
-    new `RedisCacheBackend(CacheBackend)` class in this module and
-    wired in below; no other module should need to change.
+    `exceptions.CacheError` usage here) — when it's built, it should be
+    added as a new `RedisCacheBackend(CacheBackend)` class in this
+    module and wired in below; no other module should need to change.
     """
     resolved_settings = settings or get_settings()
 
@@ -274,7 +273,7 @@ def build_cache_key(*parts: str | int | None) -> str:
 
     This is the standard key-builder the tool layer will use to cache
     eCFR content keyed on `(title, part, section, date)`, per the
-    caching strategy documented in `PROJECT_HANDOFF.md` Section 22.
+    caching strategy used by the tool layer.
     """
     rendered = [str(part) if part is not None else "none" for part in parts]
     return ":".join(rendered)
