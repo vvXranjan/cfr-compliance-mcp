@@ -132,3 +132,14 @@ class ComplianceResult(BaseModel):
         default=None,
         description="Audit trail of the decision, populated by the pipeline.",
     )
+
+    memory_participated: bool = Field(
+        default=False,
+        description=(
+            "True when historical Compliance Memory influenced this "
+            "evaluation (exact-match reuse or supplied historical "
+            "context). Memory is advisory context only, never a source "
+            "of regulatory truth; memory-assisted results are never "
+            "auto-indexed back into memory (feedback-loop prevention)."
+        ),
+    )

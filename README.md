@@ -86,9 +86,15 @@ VERIFIED   NEEDS_REVIEW
   evidence citations) so a human can review.
 - **REST API** — FastAPI service (`api.py`) exposing `/health`,
   `/evaluate-clause`, and `/evaluate-bulk`, with structured safe errors.
-- **Report persistence** — `/evaluate-bulk` can persist an auditable JSON
-  report (opt-in via `CFR_REPORTS_DIR`) with atomic writes and
-  path-traversal-safe filenames.
+- **Report persistence** — `/evaluate-bulk` can persist an auditable report
+  (opt-in via `CFR_REPORTS_DIR`) with atomic writes and
+  path-traversal-safe filenames, written through a `PersistenceRepository`
+  boundary (`FileRepository` today; PostgreSQL deliberately deferred until
+  the review/dashboard layer needs queryable history).
+- **Compliance Memory** — an opt-in, deterministic, durable, *advisory*
+  layer (append-only JSONL store) that persists eligible **VERIFIED**
+  outcomes and reuses them only as clearly labeled historical context.
+  It is never a source of regulatory truth (see below).
 - **Benchmarking** — a deterministic, offline benchmark harness
   (`benchmark/`) comparing sequential vs concurrent evaluation.
 - **Observability** — OpenTelemetry HTTP-request tracing with best-effort
@@ -111,6 +117,9 @@ Required environment variables (see `.env.example` for the full list):
 | `OPENAI_API_KEY` | Fallback credential for any OpenAI-compatible endpoint |
 | `ECFR_BASE_URL` | eCFR API base URL (default `https://www.ecfr.gov`) |
 | `CFR_REPORTS_DIR` | Enable report persistence for `/evaluate-bulk` |
+| `CFR_PERSISTENCE_BACKEND` | Persistence backend: `file` (default). `postgres` is recognized but not implemented — fails clearly at startup |
+| `CFR_MEMORY_ENABLED` | Enable the advisory Compliance Memory layer (default off) |
+| `CFR_MEMORY_DIR` | Directory for the append-only memory store (default `<repo>/memory`) |
 | `CORS_ORIGINS` | Allowed CORS origins for the REST API |
 | `JAEGER_AGENT_HOST` / `JAEGER_AGENT_PORT` | Jaeger agent for tracing (best-effort) |
 
@@ -139,6 +148,56 @@ uv run uvicorn api:app --host 0.0.0.0 --port 8000
 | `/evaluate-bulk` | POST | Evaluate a batch of clauses (max 200), optionally persisting a report |
 
 Interactive docs are available at `/api/docs` and `/api/redoc`.
+
+## Compliance Memory (advisory, deterministic)
+
+Compliance Memory is an opt-in layer that gives the pipeline cross-run
+knowledge without ever becoming an independent source of regulatory truth.
+
+### Authority hierarchy (never reordered)
+
+1. Current authoritative eCFR / version-aware retrieval
+2. Current deterministic validation
+3. Current compliance evaluation + verification
+4. Historical Compliance Memory as contextual precedent **only**
+
+### Retrieval modes
+
+- **Exact historical match** — may reuse a stored verdict *only* after
+  every compatibility gate passes: identical clause fingerprint, an
+  eligible/verified/review-free record, compatible citation/scope, and
+  compatible effective-version metadata — and only when the current
+  authoritative CFR retrieval is present and usable. If any gate fails,
+  the record is surfaced as context, never reused.
+- **Near-duplicate match** — deterministic token-overlap similarity only.
+  Near records are supplied to the LLM as labeled `HISTORICAL_CONTEXT`
+  (DATA), never as a verdict reuse. Near matches can never bypass the
+  security → retrieval → deterministic → evaluation → verification path.
+
+### Indexing eligibility (Option A — feedback-loop prevention)
+
+Only **CFR-only** evaluations are automatically eligible for indexing: a
+result that memory participated in (exact-match reuse or supplied
+historical context) is marked `memory_participated` and is **never**
+auto-indexed. Auto-indexing additionally requires `verification_status ==
+"verified"`, no unresolved review state, no security rejection, and
+complete evidence + provenance. NEEDS_REVIEW, security-rejected, failed
+and malformed results are never indexed. Deduplication uses a stable
+content-addressed `record_id` (`sha256(clause_id|citation|effective_version)`).
+
+### Failure behavior
+
+Memory is fail-open. A disabled, empty, malformed, or failing store
+silently degrades to the authoritative-only pipeline. A memory indexing
+failure is logged and never invalidates an otherwise valid compliance
+result. Memory failures can never produce or change a verdict.
+
+### Observability
+
+Structured events: `memory_index_attempt/success/skipped`,
+`memory_retrieval_success/empty/failure`, `memory_exact_match`,
+`memory_near_match`, `fallback_to_authoritative_only`. Full contract
+text, prompts, embeddings, secrets and API keys are never logged.
 
 ## Running the benchmark
 
@@ -201,7 +260,9 @@ docker run --rm -p 8000:8000 -e ATM_API_KEY=... cfr-compliance-mcp
 
 ## Evaluation & Validation
 
-- 139 tests pass (130 offline + 9 live LLM tests, which require `ATM_API_KEY`)
+- 181 offline tests pass (130 prior + 33 new Compliance Memory tests +
+  18 new persistence repository tests);
+  9 live LLM tests require `ATM_API_KEY` and network access
 - `ruff check .` — clean
 - Docker build and runtime verified (`/health` and `/evaluate-clause`)
 
@@ -214,5 +275,9 @@ docker run --rm -p 8000:8000 -e ATM_API_KEY=... cfr-compliance-mcp
 - Synthetic benchmarks do not represent real external network/model latency.
 - Report persistence is filesystem-based, not multi-node distributed
   persistence.
+- Compliance Memory is deterministic and local (append-only JSONL, no
+  vector database or embeddings); it is advisory context only and is
+  opt-in via `CFR_MEMORY_ENABLED`. Memory-assisted results require
+  human-driven re-verification before they can become precedent.
 - The eCFR cache is process-local memory (`CACHE_BACKEND=memory`); Redis is
   declared in configuration but not implemented.

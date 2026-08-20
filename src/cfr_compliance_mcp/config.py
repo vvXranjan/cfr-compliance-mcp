@@ -44,6 +44,25 @@ class Settings(BaseSettings):
     cache_ttl_seconds: int = Field(default=3600, gt=0)
     redis_url: str = Field(default="redis://localhost:6379/0")
 
+    # --- Compliance Memory (deterministic, durable, advisory) ---
+    # Historical, VERIFIED outcomes are persisted as an append-only JSONL
+    # store and may be used as contextual precedent only -- never as a
+    # source of regulatory truth. Opt-in: defaults to the authoritative-only
+    # pipeline. Set cfr_memory_enabled=false explicitly to force it (memory
+    # failures are always fail-open regardless).
+    cfr_memory_enabled: bool = Field(default=False)
+    cfr_memory_dir: str = Field(default="")
+
+    # --- Persistence ---
+    # Analysis/report persistence backend. "file" (default) persists
+    # auditable JSON reports via agent.reporting. "postgres" is recognized
+    # but NOT implemented yet -- selecting it fails clearly at repository
+    # construction (never a silent fallback to "file"). PostgreSQL will be
+    # introduced only when the dashboard/review/history layer needs
+    # queryable persistence.
+    cfr_persistence_backend: Literal["file", "postgres"] = Field(default="file")
+    cfr_database_url: str = Field(default="")
+
     # --- Logging ---
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(default="INFO")
     log_format: Literal["json", "text"] = Field(default="text")

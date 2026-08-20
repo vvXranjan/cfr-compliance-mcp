@@ -44,7 +44,8 @@ except ImportError:  # pragma: no cover - depends on installed exporter version
 
 from agent.deterministic_rules import evaluate_deterministic
 from agent.models import Clause, ComplianceResult, EvidencePassage, ReviewAudit
-from agent.reporting import build_report, save_report
+from agent.persistence import get_persistence_repository
+from agent.reporting import build_report
 from agent.security import (
     check_clause_security,
     sanitize_cfr_text,
@@ -63,7 +64,9 @@ app = FastAPI(
     title="cfr-compliance-mcp API",
     description=(
         "Production-oriented AI compliance engineering platform - "
-        "evidence-grounded, auditable, hybrid RAG CFR compliance checking"
+        "evidence-grounded, auditable CFR compliance checking with an "
+        "authoritative retrieval pipeline and an optional, advisory "
+        "deterministic Compliance Memory for historical context"
     ),
     version="0.2.0",
     docs_url="/api/docs",
@@ -86,10 +89,15 @@ app.add_middleware(
 # see the human-review boundary documented on each endpoint.
 LLM_AVAILABLE = os.getenv("ATM_API_KEY") is not None or os.getenv("OPENAI_API_KEY") is not None
 
-# When set, /evaluate-bulk persists an auditable JSON report to this
-# directory (typically the repository's reports/). Opt-in: unset means
-# no persistence. Persistence failures never fail the request.
+# When set, /evaluate-bulk persists an auditable report to this directory
+# (typically the repository's reports/). Opt-in: unset means no
+# persistence. Persistence failures never fail the request.
 REPORTS_DIR = os.getenv("CFR_REPORTS_DIR")
+
+# The configured persistence backend (CFR_PERSISTENCE_BACKEND, default
+# "file"). Constructed once at startup so an unsupported/not-implemented
+# backend fails clearly instead of silently falling back.
+PERSISTENCE_REPO = get_persistence_repository()
 
 # ---------------------------------------------------------------------------
 # OpenTelemetry tracing setup
@@ -267,6 +275,15 @@ class ComplianceResponse(BaseModel):
         default="not_verified",
         description="verified / needs_review / not_verified.",
     )
+    memory_participated: bool = Field(
+        default=False,
+        description=(
+            "True when historical Compliance Memory influenced this "
+            "evaluation (exact-match reuse or supplied historical "
+            "context). Memory is advisory context only, never a source "
+            "of regulatory truth."
+        ),
+    )
     review_audit: ReviewAuditOut | None = Field(
         default=None,
         description="Audit trail explaining the decision, incl. why review is required.",
@@ -408,21 +425,56 @@ def _api_needs_review(
     )
 
 
+def _api_enrich_evidence(
+    evidence: list[EvidencePassage], *, cfr_citation: str, retrieved_at: str
+) -> list[EvidencePassage]:
+    """Attach honest caller-supplied provenance to API-path evidence.
+
+    The API receives regulation text from the caller rather than from
+    the retrieval layer, so provenance is labeled ``caller_supplied``.
+    Version/as-of-date metadata is unknown here and stays empty -- the
+    system never fabricates it. Only empty provenance fields are filled
+    (idempotent).
+    """
+    enriched: list[EvidencePassage] = []
+    for ev in evidence or []:
+        enriched.append(
+            ev.model_copy(
+                update={
+                    "source": ev.source or "eCFR",
+                    "retrieved_at": ev.retrieved_at or retrieved_at,
+                    "retrieval_method": ev.retrieval_method or "caller_supplied",
+                    "date": ev.date,
+                }
+            )
+        )
+    return enriched
+
+
 def _evaluate_clause(
     clause: Clause,
     *,
     cfr_text: str,
     cfr_citation: str,
     cfr_title: int | None,
+    memory=None,
 ) -> ComplianceResult:
     """Evaluate one clause through the full pipeline.
 
     Order (deterministic where possible, LLM only as fallback):
       1. Deterministic rule-based checking (LLM-free, fast, auditable).
-      2. If inconclusive, LLM compliance agent evaluation (only when the
+      2. Compliance Memory lookup (optional, fail-open): near-duplicate
+         historical records are supplied to the LLM as labeled
+         HISTORICAL_CONTEXT (DATA) only -- never a verdict reuse. The
+         API path has no effective-version metadata, so exact-match
+         reuse is conservatively disabled here.
+      3. If inconclusive, LLM compliance agent evaluation (only when the
          caller supplied regulation text and an LLM is configured).
-      3. Verification agent cross-check of the LLM decision.
-      4. Conflict/uncertainty routes to "Needs Review" (human review).
+      4. Verification agent cross-check of the LLM decision.
+      5. Conflict/uncertainty routes to "Needs Review" (human review).
+
+    Memory indexing (Option A): verified CFR-only results are indexed
+    non-blocking; memory-assisted results never are.
 
     Raises:
         ValueError: if called with no regulation text (caller should
@@ -439,17 +491,43 @@ def _evaluate_clause(
         )
 
     cfr_text = sanitize_cfr_text(cfr_text)
+    retrieved_at = datetime.now(UTC).isoformat()
+    title = cfr_title or 0
+
+    # --- Step 1b: Compliance Memory lookup (optional, fail-open) ---
+    lookup = None
+    historical_context: str | None = None
+    memory_assisted = False
+    if memory is not None:
+        from agent.memory import format_historical_context
+
+        lookup = memory.retrieve(
+            clause,
+            citation=cfr_citation,
+            title=title,
+            effective_version="",
+            date="",
+        )
+        memory_assisted = bool(lookup is not None and lookup.participated)
+        if lookup is not None and lookup.near:
+            historical_context = format_historical_context(
+                lookup, clause_title=clause.title, citation=cfr_citation
+            )
 
     # --- Step 1: Deterministic rules (LLM-free) ---
     det_result = evaluate_deterministic(
         clause=clause,
         cfr_text=cfr_text,
-        title=cfr_title or 0,
+        title=title,
     )
     if det_result.status != "Needs Review":
-        return det_result.model_copy(
+        evidence = _api_enrich_evidence(
+            det_result.evidence, cfr_citation=cfr_citation, retrieved_at=retrieved_at
+        )
+        result = det_result.model_copy(
             update={
                 "verification_status": "verified",
+                "evidence": evidence,
                 "review_audit": ReviewAudit(
                     final_status=det_result.status,
                     proposed_status=det_result.status,
@@ -457,12 +535,22 @@ def _evaluate_clause(
                     verifier_recommendation="not_run",
                     deterministic_status=det_result.status,
                     evidence_citations=[
-                        ev.citation for ev in det_result.evidence if ev.citation
+                        ev.citation for ev in evidence if ev.citation
                     ],
-                    reviewed_at=datetime.now(UTC).isoformat(),
+                    reviewed_at=retrieved_at,
                 ),
             }
         )
+        _index_verified_api(
+            result,
+            memory=memory,
+            clause=clause,
+            cfr_citation=cfr_citation,
+            title=title,
+            retrieved_at=retrieved_at,
+            memory_assisted=False,
+        )
+        return result
 
     # --- Step 2: LLM fallback (if available) ---
     if not LLM_AVAILABLE:
@@ -478,19 +566,22 @@ def _evaluate_clause(
 
     from agent.compliance_agent import evaluate_compliance
 
-    llm_result = evaluate_compliance(
-        clause_title=clause.title,
-        clause_text=clause.text,
-        cfr_citation=cfr_citation,
-        cfr_text=cfr_text,
-    )
+    llm_kwargs = {
+        "clause_title": clause.title,
+        "clause_text": clause.text,
+        "cfr_citation": cfr_citation,
+        "cfr_text": cfr_text,
+    }
+    if historical_context:
+        llm_kwargs["historical_context"] = historical_context
+    llm_result = evaluate_compliance(**llm_kwargs)
 
     # --- Step 3: Verification cross-check ---
     verification = verify_compliance(
         result=llm_result,
         clause=clause,
         cfr_text=cfr_text,
-        title=cfr_title or 0,
+        title=title,
         version_payload=None,
     )
 
@@ -503,10 +594,15 @@ def _evaluate_clause(
             deterministic_status=det_result.status,
         )
 
-    return llm_result.model_copy(
+    evidence = _api_enrich_evidence(
+        llm_result.evidence, cfr_citation=cfr_citation, retrieved_at=retrieved_at
+    )
+    result = llm_result.model_copy(
         update={
             "verification_status": "verified",
             "review_reason": "",
+            "evidence": evidence,
+            "memory_participated": memory_assisted,
             "review_audit": ReviewAudit(
                 final_status=llm_result.status,
                 proposed_status=llm_result.status,
@@ -515,11 +611,49 @@ def _evaluate_clause(
                 verifier_notes=verification.notes,
                 deterministic_status=det_result.status,
                 evidence_citations=[
-                    ev.citation for ev in llm_result.evidence if ev.citation
+                    ev.citation for ev in evidence if ev.citation
                 ],
-                reviewed_at=datetime.now(UTC).isoformat(),
+                reviewed_at=retrieved_at,
             ),
         }
+    )
+    _index_verified_api(
+        result,
+        memory=memory,
+        clause=clause,
+        cfr_citation=cfr_citation,
+        title=title,
+        retrieved_at=retrieved_at,
+        memory_assisted=memory_assisted,
+    )
+    return result
+
+
+def _index_verified_api(
+    result: ComplianceResult,
+    *,
+    memory,
+    clause: Clause,
+    cfr_citation: str,
+    title: int,
+    retrieved_at: str,
+    memory_assisted: bool,
+) -> None:
+    """Non-blocking, fail-open index for the API evaluation path."""
+    if memory is None or memory_assisted:
+        return
+    memory.index(
+        result,
+        clause=clause,
+        citation=cfr_citation,
+        title=title,
+        effective_version="",
+        date="",
+        version_specific=False,
+        source="eCFR",
+        retrieval_method="caller_supplied",
+        retrieved_at=retrieved_at,
+        memory_assisted=False,
     )
 
 
@@ -553,6 +687,7 @@ def _response_from_result(
         verified=verified,
         verification_notes=verification_notes or (audit_out.verifier_notes if audit_out else ""),
         verification_status=result.verification_status,
+        memory_participated=result.memory_participated,
         review_audit=audit_out,
     )
 
@@ -599,12 +734,17 @@ async def evaluate_single_clause(clause_input: ClauseInput) -> ComplianceRespons
             detail=f"Clause rejected by security scan: {security_details}",
         )
 
+    from agent.memory import get_compliance_memory
+
+    memory = get_compliance_memory()
+
     try:
         result = _evaluate_clause(
             clause,
             cfr_text=clause_input.cfr_text or "",
             cfr_citation=clause_input.cfr_citation or f"{cfr_title or 0} CFR",
             cfr_title=cfr_title,
+            memory=memory,
         )
     except Exception:
         logger.exception("Failed to evaluate clause via API")
@@ -637,6 +777,11 @@ async def evaluate_bulk_clauses(
 
     results: list[ComplianceResponse] = []
     domain_results: list[ComplianceResult] = []
+
+    from agent.memory import get_compliance_memory
+
+    memory = get_compliance_memory()
+
     for clause_input in clauses:
         clause = _clause_from_input(clause_input)
 
@@ -668,6 +813,7 @@ async def evaluate_bulk_clauses(
                 cfr_text=clause_input.cfr_text or "",
                 cfr_citation=clause_input.cfr_citation or f"{cfr_title or 0} CFR",
                 cfr_title=cfr_title,
+                memory=memory,
             )
         except Exception:
             logger.exception("Failed to evaluate clause %r in bulk", clause.title)
@@ -711,12 +857,17 @@ def _persist_bulk_report(
     clauses: list[ClauseInput],
     domain_results: list[ComplianceResult],
 ) -> None:
-    """Persist an auditable JSON report for a bulk evaluation.
+    """Persist an auditable report for a bulk evaluation.
 
     Enabled via ``CFR_REPORTS_DIR``. The report preserves the full
     decision trail (statuses, evidence with retrieval + version
     metadata, review reasons and the complete review audit) -- never the
     full contract body or secrets (see ``agent.reporting``).
+
+    Persistence goes through the `PersistenceRepository` boundary so the
+    backend can evolve independently of the API. Non-blocking by design:
+    a persistence failure is the caller's to log; the compliance result
+    must never fail because persistence failed.
     """
     from agent.reporting import new_analysis_id
 
@@ -726,5 +877,5 @@ def _persist_bulk_report(
         domain_results,
         analysis_id=new_analysis_id(),
     )
-    path = save_report(record, reports_dir=REPORTS_DIR)
+    path = PERSISTENCE_REPO.save_report(record, reports_dir=REPORTS_DIR)
     logger.info("Persisted bulk compliance report to %s", path)

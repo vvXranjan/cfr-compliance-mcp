@@ -3,11 +3,17 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import UTC, datetime
+from typing import Any
 
 from .compliance_agent import evaluate_compliance
 from .contract_parser import ContractParser, split_into_clauses
 from .deterministic_rules import evaluate_deterministic
 from .mcp_search import CfrMatch, retrieve_for_clauses
+from .memory import (
+    ComplianceMemory,
+    format_historical_context,
+    get_compliance_memory,
+)
 from .models import Clause, ComplianceResult, EvidencePassage, ReviewAudit
 from .security import check_clause_security
 from .verification_agent import verify_compliance
@@ -111,7 +117,97 @@ def _needs_review(
     )
 
 
-async def _evaluate_match(match: CfrMatch) -> ComplianceResult:
+def _result_from_memory_record(
+    record, clause: Clause, citation: str
+) -> ComplianceResult:
+    """Rebuild a ComplianceResult from a verified historical record.
+
+    Only reached after every exact-match reuse gate has passed inside
+    `ComplianceMemory.retrieve`. The reused verdict is explicitly marked
+    ``memory_participated`` so it is never auto-indexed back into memory
+    (feedback-loop prevention) and so downstream callers can see that
+    historical memory participated.
+    """
+    evidence = [
+        EvidencePassage(
+            title=ev.get("title", 0),
+            part=ev.get("part"),
+            section=ev.get("section"),
+            date=ev.get("date", ""),
+            text_span=ev.get("text_span", ""),
+            citation=ev.get("citation", ""),
+            source=ev.get("source", ""),
+            retrieved_at=ev.get("retrieved_at", ""),
+            retrieval_method=ev.get("retrieval_method", ""),
+            version=ev.get("version", ""),
+            confidence=None,
+        )
+        for ev in record.evidence
+    ]
+    return ComplianceResult(
+        clause_title=record.clause_title,
+        clause_id=record.clause_id,
+        status=record.status,
+        confidence=record.confidence,
+        reason=record.reason,
+        evidence=evidence,
+        verification_status="verified",
+        review_reason="",
+        memory_participated=True,
+        review_audit=ReviewAudit(
+            final_status=record.status,
+            proposed_status=record.status,
+            proposed_confidence=record.confidence,
+            verifier_recommendation="memory_reuse",
+            verifier_notes=(
+                "Verdict reused from a verified historical memory record "
+                "after compatibility checks passed; current authoritative "
+                "CFR retrieval confirmed. Historical memory is contextual "
+                "precedent only, never a source of regulatory truth."
+            ),
+            deterministic_status="memory_reuse",
+            evidence_citations=[ev.citation for ev in evidence if ev.citation],
+            reviewed_at=_now_iso(),
+        ),
+    )
+
+
+def _index_verified(
+    result: ComplianceResult,
+    *,
+    memory: ComplianceMemory | None,
+    clause: Clause,
+    match: CfrMatch,
+    title: int,
+    memory_assisted: bool,
+) -> None:
+    """Non-blocking, fail-open index of a verified CFR-only result.
+
+    A persistence failure is logged and ignored; the compliance result
+    stays valid. Memory-assisted results are never auto-indexed (Option
+    A feedback-loop prevention) -- this is enforced both here and inside
+    `ComplianceMemory.index` as defense in depth.
+    """
+    if memory is None or memory_assisted:
+        return
+    memory.index(
+        result,
+        clause=clause,
+        citation=match.citation or "",
+        title=title,
+        effective_version=match.effective_version,
+        date=match.date,
+        version_specific=match.version_specific,
+        source=match.source,
+        retrieval_method=match.retrieval_method,
+        retrieved_at=match.retrieved_at,
+        memory_assisted=False,
+    )
+
+
+async def _evaluate_match(
+    match: CfrMatch, *, memory: ComplianceMemory | None = None
+) -> ComplianceResult:
     """Turn one `CfrMatch` into a `ComplianceResult`.
 
     Canonical evaluation path -- every clause that reaches the LLM must
@@ -121,6 +217,13 @@ async def _evaluate_match(match: CfrMatch) -> ComplianceResult:
     Strategy:
      0. Security gate (injection / title / length) -- fail safe to review.
      1. If CFR retrieval failed (no citation/text), return "Needs Review".
+     1b. Compliance Memory (optional, fail-open): retrieve historical
+         context. An eligible exact match MAY reuse its verified verdict
+         ONLY after every compatibility check passes (identical clause
+         fingerprint, verified/review-free record, compatible citation
+         and effective version) AND the current authoritative retrieval
+         is present and usable. Near-duplicate records are contextual
+         only -- they never reuse a verdict.
      2. Run deterministic rule-based checking first -- if a rule reaches
         a confident verdict, use it (LLM-free, zero latency, fully auditable).
      3. If all rules are "unsure", fall back to the LLM compliance agent.
@@ -132,6 +235,13 @@ async def _evaluate_match(match: CfrMatch) -> ComplianceResult:
     Authoritative retrieval provenance (source, retrieved_at,
     retrieval_method, version, as-of date) is attached to evidence
     passages here -- never by the LLM.
+
+    Memory indexing (Option A): verified results are auto-indexed only
+    when memory did NOT participate in the evaluation (CFR-only).
+    Memory-assisted results -- exact-match reuse or supplied historical
+    context -- are never auto-indexed, preventing a feedback loop.
+    Indexing is always non-blocking: a persistence failure is logged and
+    the compliance result stays valid.
     """
     clause = match.clause
 
@@ -159,6 +269,37 @@ async def _evaluate_match(match: CfrMatch) -> ComplianceResult:
 
     logger.info("Evaluating compliance for clause %r against %s", clause.title, match.citation)
 
+    # --- Step 1b: Compliance Memory lookup (optional, fail-open) ---
+    lookup = None
+    if memory is not None:
+        lookup = memory.retrieve(
+            clause,
+            citation=match.citation,
+            title=title,
+            effective_version=match.effective_version,
+            date=match.date,
+        )
+        if lookup is not None and lookup.match_type == "exact" and lookup.exact is not None:
+            # Exact-match reuse: every compatibility gate passed inside
+            # `retrieve`, and current authoritative retrieval is usable
+            # (checked above). Memory-assisted => never auto-indexed.
+            logger.info(
+                "memory_exact_reuse clause=%r citation=%s record=%s",
+                clause.title, match.citation, lookup.exact.record_id,
+            )
+            return _result_from_memory_record(
+                lookup.exact, clause=clause, citation=match.citation
+            )
+
+    historical_context: str | None = None
+    memory_assisted = bool(lookup is not None and lookup.participated)
+    if lookup is not None and lookup.near:
+        historical_context = format_historical_context(
+            lookup,
+            clause_title=clause.title,
+            citation=match.citation,
+        )
+
     # --- Step 2: Deterministic rule check (LLM-free) ---
     det_result: ComplianceResult | None = None
     try:
@@ -175,7 +316,7 @@ async def _evaluate_match(match: CfrMatch) -> ComplianceResult:
                 clause.title, det_result.status, det_result.confidence,
             )
             evidence = _enrich_evidence(det_result.evidence, match)
-            return ComplianceResult(
+            result = ComplianceResult(
                 clause_title=clause.title,
                 clause_id=clause.clause_id,
                 status=det_result.status,
@@ -189,6 +330,17 @@ async def _evaluate_match(match: CfrMatch) -> ComplianceResult:
                     deterministic_status=det_result.status,
                 ),
             )
+            # Deterministic decisions ignore historical context, so they
+            # are CFR-only and may be indexed (non-blocking).
+            _index_verified(
+                result,
+                memory=memory,
+                clause=clause,
+                match=match,
+                title=title,
+                memory_assisted=False,
+            )
+            return result
     except Exception as exc:
         logger.warning(
             "Deterministic rule evaluation failed for clause %r: %s",
@@ -199,13 +351,15 @@ async def _evaluate_match(match: CfrMatch) -> ComplianceResult:
     logger.info("Deterministic rules inconclusive for clause %r; falling back to LLM", clause.title)
 
     try:
-        result = await asyncio.to_thread(
-            evaluate_compliance,
-            clause_title=clause.title,
-            clause_text=clause.text,
-            cfr_citation=match.citation,
-            cfr_text=match.regulation_text,
-        )
+        llm_kwargs: dict[str, Any] = {
+            "clause_title": clause.title,
+            "clause_text": clause.text,
+            "cfr_citation": match.citation,
+            "cfr_text": match.regulation_text,
+        }
+        if historical_context:
+            llm_kwargs["historical_context"] = historical_context
+        result = await asyncio.to_thread(evaluate_compliance, **llm_kwargs)
     except Exception as exc:
         logger.exception("Compliance evaluation failed for clause %r", clause.title)
         return _needs_review(
@@ -254,10 +408,11 @@ async def _evaluate_match(match: CfrMatch) -> ComplianceResult:
 
         # Verification passed - return the LLM result as verified, with
         # authoritative retrieval provenance attached to its evidence.
-        return result.model_copy(
+        result = result.model_copy(
             update={
                 "verification_status": "verified",
                 "review_reason": "",
+                "memory_participated": memory_assisted,
                 "review_audit": _build_audit(
                     final_status=result.status,
                     proposed=result,
@@ -266,6 +421,16 @@ async def _evaluate_match(match: CfrMatch) -> ComplianceResult:
                 ),
             }
         )
+        # Option A: only CFR-only verified results are auto-indexed.
+        _index_verified(
+            result,
+            memory=memory,
+            clause=clause,
+            match=match,
+            title=title,
+            memory_assisted=memory_assisted,
+        )
+        return result
 
     except Exception as exc:
         logger.exception("Verification failed for clause %r", clause.title)
@@ -316,9 +481,13 @@ async def run_compliance_pipeline(clauses: list[Clause]) -> list[ComplianceResul
         traceback.print_exc()
         raise
 
+    # Compliance Memory is optional and fail-open: a disabled/empty/
+    # failing store degrades to the authoritative-only pipeline.
+    memory = get_compliance_memory()
+
     # results = [await _evaluate_match(match) for match in matches]
     tasks = [
-        asyncio.create_task(_evaluate_match(match))
+        asyncio.create_task(_evaluate_match(match, memory=memory))
         for match in matches
     ]       
 

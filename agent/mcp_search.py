@@ -457,7 +457,7 @@ async def _fetch_version_history(
 
     Note: this is a new addition - the existing `get_version_history`
     MCP tool already wraps this client method, so this function provides
-    direct access for the hybrid RAG version-aware retrieval flow.
+    direct access for the version-aware retrieval flow.
     """
     args: dict[str, Any] = {"title": title}
     if part is not None:

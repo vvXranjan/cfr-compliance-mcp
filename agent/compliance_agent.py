@@ -130,6 +130,7 @@ class ComplianceAgent:
         clause_text: str,
         cfr_citation: str,
         cfr_text: str,
+        historical_context: str | None = None,
     ) -> ComplianceResult:
         """
         Evaluate a single contract clause against a single CFR regulation.
@@ -142,6 +143,13 @@ class ComplianceAgent:
             cfr_citation: Citation identifying the CFR regulation
                 (e.g. "48 CFR 52.204-21").
             cfr_text: Full text of the retrieved CFR regulation.
+            historical_context: Optional pre-formatted HISTORICAL_CONTEXT
+                block (verified prior outcomes for this or a similar
+                clause). Supplied as DATA in the user prompt only -- never
+                in the privileged system instructions. Historical context
+                is advisory precedent, not law; it cannot establish or
+                replace a CFR requirement and must never appear as an
+                evidence citation.
 
         Returns:
             A validated `ComplianceResult`.
@@ -163,6 +171,7 @@ class ComplianceAgent:
             clause_text=clause_text,
             cfr_citation=cfr_citation,
             cfr_text=cfr_text,
+            historical_context=historical_context,
         )
 
         # Send the prompt to the LLM via a direct HTTP request to the
@@ -339,9 +348,16 @@ class ComplianceAgent:
         clause_text: str,
         cfr_citation: str,
         cfr_text: str,
+        historical_context: str | None = None,
     ) -> str:
-        """Build the user-facing prompt for a single evaluation."""
-        return f"""\
+        """Build the user-facing prompt for a single evaluation.
+
+        ``historical_context`` (if any) is appended as a clearly labeled,
+        structurally separate HISTORICAL_CONTEXT DATA block. It is never
+        concatenated into the privileged system instructions and never
+        interleaved with the authoritative CFR regulation.
+        """
+        prompt = f"""\
 Review the following contract clause.
 
 =====================
@@ -369,6 +385,9 @@ Regulation Text:
 Compare the contract clause against the CFR regulation and determine
 compliance.
 """
+        if historical_context:
+            prompt = f"{prompt}\n\n{historical_context}"
+        return prompt
 
     # ------------------------------------------------------------------
 # LLM configuration
@@ -405,6 +424,7 @@ def evaluate_compliance(
     cfr_citation: str,
     cfr_text: str,
     model: Any | None = None,
+    historical_context: str | None = None,
 ) -> ComplianceResult:
     """
     Convenience function used by the compliance pipeline.
@@ -419,6 +439,7 @@ def evaluate_compliance(
         clause_text=clause_text,
         cfr_citation=cfr_citation,
         cfr_text=cfr_text,
+        historical_context=historical_context,
     )
 
 
