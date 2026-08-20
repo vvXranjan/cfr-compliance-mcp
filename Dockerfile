@@ -1,66 +1,54 @@
 # Dockerfile for cfr-compliance-mcp
-# Production-oriented AI compliance engineering platform
+#
+# Production image for the FastAPI compliance service (api.py). The image
+# serves the REST API on port 8000 via uvicorn.
+#
+# The MCP server is a separate process (`uv run cfr-compliance-mcp`,
+# default `stdio` transport) and is NOT run by this image. See README for
+# the MCP launch paths.
 #
 # Build: docker build -t cfr-compliance-mcp .
-# Run:   docker run -p 8000:8000 -e OPENAI_API_KEY=... cfr-compliance-mcp
+# Run:
+#   docker run --rm -p 8000:8000 \
+#     -e ATM_API_KEY=... \
+#     cfr-compliance-mcp
+#
+# Tracing is best-effort: the app exports spans to a Jaeger *agent* over
+# UDP (thrift) using JAEGER_AGENT_HOST / JAEGER_AGENT_PORT. If no Jaeger
+# agent is reachable the app logs a warning and continues serving.
+#
+# The build context must be filtered by .dockerignore (the local `.env`
+# file and the large unreferenced contract PDFs are excluded there).
 
-# Use a lightweight Python base image
-FROM python:3.12-slim AS builder
+FROM python:3.13-slim
 
-# Set working directory
-WORKDIR /app
-
-# Install system dependencies (minimal for security and size)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    git \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install Python dependencies
-# Copy only dependency files first for layer caching
-COPY pyproject.toml uv.lock ./
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
-    pip install --no-cache-dir -e ".[dev]" 2>&1 | tail -5
-
-# Copy project source code
-COPY src/ /Users/vaibhavvikasranjan/Downloads/cfr-compliance-mcp/src/
-COPY agent/ /Users/vaibhavvikasranjan/Downloads/cfr-compliance-mcp/agent/
-COPY api.py /Users/vaibhavvikasranjan/Downloads/cfr-compliance-mcp/api.py
-COPY reports/ /Users/vaibhavvikasranjan/Downloads/cfr-compliance-mcp/reports/
-COPY contracts/ /Users/vaibhavvikasranjan/Downloads/cfr-compliance-mcp/contracts/
-
-# ---- Runtime stage ----
-FROM python:3.12-slim AS runtime
-
-WORKDIR /app
-
-# Install minimal runtime dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy installed packages from builder
-COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
-# Copy project source
-COPY --from=builder /app /app
-
-# Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    # OpenTelemetry: export to Jaeger by default (can be overridden)
-    OTEL_TRACES_EXPORTER=jaeger \
-    OTEL_ENDPOINT=http://jaeger:14268/api/traces
+    PYTHONUNBUFFERED=1
 
-# Create a non-root user for security
-RUN useradd --create-home --shell /bin/bash appuser
-WORKDIR /app/home
+# Non-root runtime user, created before any files so layers below can chown.
+RUN groupadd --system appuser && useradd --system --gid appuser appuser
+
 WORKDIR /app
+
+# Install the package and its dependencies first for layer caching.
+# Uses uv with the committed uv.lock so builds are reproducible across time.
+COPY pyproject.toml uv.lock README.md ./
+COPY src/ ./src/
+RUN pip install --no-cache-dir uv && \
+    uv sync --locked --no-dev
+
+ENV PATH="/app/.venv/bin:$PATH"
+
+# Application modules that are not part of the installed package.
+COPY agent/ ./agent/
+COPY api.py ./
+
+# Writable report directory for CFR_REPORTS_DIR persistence.
+RUN mkdir -p /app/reports && chown -R appuser:appuser /app
+
 USER appuser
 
-# Expose the FastAPI port
 EXPOSE 8000
 
-# Entrypoint
-# - Uses uvicorn to serve the FastAPI app
-# - Can be overridden via command line
-CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "info"]
+# The FastAPI app is the service; uvicorn is installed as a dependency.
+CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]

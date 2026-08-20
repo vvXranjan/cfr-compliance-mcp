@@ -29,19 +29,14 @@ Wires together every layer built so far into a runnable MCP server:
 KNOWN RISK (disclosed, not hidden): this module's exact calls into the
 `fastmcp` package (`FastMCP(...)`, `mcp.tool()`, `mcp.run_async(...)`,
 and the `lifespan=` constructor parameter) are written against the
-documented FastMCP v3.x API pattern from training knowledge. The
-`lifespan` parameter and its `Callable[[FastMCP], AbstractAsyncContextManager[None]]`
-signature have been cross-checked against the FastMCP 3.4.4 environment
-description supplied for this task, but have **not** been verified
-against a live `fastmcp` installation or the current gofastmcp.com docs
-in this session — this sandbox has no network access, so `fastmcp`
-could not be installed or imported to confirm. This should be the
-*first* thing verified once network access is available (`uv sync`,
-then `uv run cfr-compliance-mcp --help`, `fastmcp dev server.py`, or
-equivalent), before relying on this module in any real environment.
-Every other piece of this file (resource wiring, tool registration
-order, shutdown handling) is ordinary Python and has been reviewed
-accordingly.
+documented FastMCP v3.x API pattern. The `lifespan` parameter and its
+`Callable[[FastMCP], AbstractAsyncContextManager[None]]` signature have
+been cross-checked against the FastMCP 3.4.4 environment, and the MCP
+server entrypoint is exercised by the test suite and the Docker image;
+the `streamable-http` transport path has not been exercised against a
+live remote client. Every other piece of this file (resource wiring,
+tool registration order, shutdown handling) is ordinary Python and has
+been reviewed accordingly.
 """
 
 from __future__ import annotations

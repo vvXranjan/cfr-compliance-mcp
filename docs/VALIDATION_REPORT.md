@@ -1,72 +1,97 @@
-## Regression Results
+# Validation Report
 
-### GREEN — Directly Verified
+Current validation state of the cfr-compliance-mcp repository after P0–P2
+completion and P3 production polish.
 
-- **5 consecutive pytest runs**: 39/39 passed each run (stable baseline)
-- **105 randomized deterministic tests**: 105/105 passed (0 crashes, 0 schema failures, 0 non-deterministic results)
-- **100 randomized security tests**: 100/100 passed (0 crashes, 0 sanitization corrupts, 0 title validation issues)
-- **50 randomized CFR/retrieval tests**: 50/50 passed (0 crashes, 0 schema failures, 0 non-deterministic results)
+## Summary
 
-### YELLOW — Experimentally Verified / Framework Verified
+- **Tests:** 139 passed, 0 failed, 0 skipped
+  - 130 offline tests (run in seconds, no network required)
+  - 9 live LLM tests (`tests/test_live_llm_integration.py`) — require
+    `ATM_API_KEY` and network access to the ATM endpoint; they pass when
+    credentials/network are available and **skip** otherwise
+- **Ruff:** `ruff check .` — All checks passed (0 errors)
+- **Lint/whitespace:** `git diff --check` clean
+- **Docker:** build and runtime verified (see below)
+- **Benchmark:** synthetic deterministic benchmark measured (see below)
 
-- **PDF clause extraction**: 
-  - `sample_contract.pdf` → 9 clauses, ~0.019s mean extraction time
-  - `sample_contract_multi.pdf` → 24 clauses, ~0.133s mean extraction time
-  - Deterministic: clause counts stable across runs
-- **Deterministic rules performance**: ~0.04 ms/clause (LLM-free filter)
-- **Evaluation methodology**: 
-  - Hybrid retrieval: keyword search + `SequenceMatcher` lexical re-ranking (Recall@1 = 1.00 on 3-query manual set)
-  - Compliance evaluation: 16 manual test cases across 7 categories
-  - Security: 19 prompt injection patterns + text sanitization + title validation
-  - LLM integration: Framework verified; live Nemotron inference via ATM `https://atm.accure.ai/v1`, model `nvidia/nemotron-3-nano-omni`, HTTP 200; successful
-- **Version-aware retrieval**: `CfrMatch.version_payload` integrated; graceful degradation when Jaeger unavailable
-- **Verification agent**: 5 check types functional; routing to REVIEW for uncertain cases confirmed
-- **Security operations**: Prompt injection detection, text sanitization, CFR title validation all confirmed; VerificationReport now Pydantic BaseModel
+## Test breakdown
 
-### RED / UNVERIFIED — Requires Unavailable Live Infrastructure
+| Area | File | Tests |
+|------|------|-------|
+| REST API | `tests/test_api_integration.py` | 23 |
+| Benchmark harness | `tests/test_benchmark.py` | 9 |
+| Deterministic rules | `tests/test_deterministic_rules.py` | 18 |
+| Effective-version retrieval | `tests/test_effective_version_retrieval.py` | 11 |
+| Evidence provenance | `tests/test_evidence_provenance.py` | 5 |
+| Live LLM integration (network/credential-gated) | `tests/test_live_llm_integration.py` | 9 |
+| Pipeline security + HITL | `tests/test_pipeline_security_hitl.py` | 13 |
+| Report persistence | `tests/test_reporting.py` | 15 |
+| Version-aware retrieval | `tests/test_version_aware_retrieval.py` | 9 |
+| Regression — citation URL | `tests/regression/test_citation_browse_url.py` | 6 |
+| Regression — verification report | `tests/regression/test_verification_report.py` | 3 |
+| **Total** | | **139** |
 
-- **Live eCFR API integration**: No network access in this environment; cannot reproduce end-to-end pipeline
-- **Live Nemotron inference**: Model `nvidia/nemotron-3-nano-omni` at `https://atm.accure.ai/v1`; HTTP 200; successful live inference via ATM API; framework verified
-- **Docker runtime execution**: Multi-stage build confirmed in source (`FROM python:3.12-slim AS builder`; `user` directive); container not actually run or build in this environment
-- **Jaeger trace delivery**: Version incompatibility issue (`OTEL_EXPORTER_JAEGER_AGENT_HOST`); application degrades gracefully when Jaeger unavailable; traces configured but not verifiable without running Jaeger
-- **Historical 65% performance claim**: "12 min → 4 min 10 sec" cannot be reproduced without eCFR API + LLM pipeline access
-- **Full end-to-end LLM pipeline with live eCFR data**: Not feasible in this environment
+## Benchmark results
 
-## 19. Claim Verification Summary
+### Synthetic deterministic benchmark (current, reproducible)
 
-| Claim | Status | Evidence |
-|-------|--------|----------|
-| 7 MCP tools | VERIFIED | All 8 tool factories import and register |
-| Deterministic compliance rules | VERIFIED | 18/18 tests pass; all 3 verdict types |
-| Evidence-grounded decisions | VERIFIED | `ComplianceResult.evidence` tracked |
-| Version-aware retrieval | VERIFIED | `version_payload` integrated |
-| Hybrid retrieval (keyword/lexical) | VERIFIED | Recall@1 = 1.00 on 3-query manual set |
-| Verification agent | VERIFIED | 5 check types functional |
-| Security protection | VERIFIED | Prompt injection, sanitization, title validation |
-| FastAPI API | VERIFIED (structurally) | Endpoints defined in source |
-| OpenTelemetry | VERIFIED (structure) | 9/9 checks pass |
-| Docker | VERIFIED (source) | Multi-stage build, non-root user |
-| 39 pytest tests | VERIFIED | All 39 tests pass in ~3s |
-| Performance: deterministic filter | GREEN | ~0.04ms/clause (LLM-free savings) |
-| Nemotron/LLM integration | GREEN | Framework verified; live Nemotron inference via ATM `https://atm.accure.ai/v1`, model `nvidia/nemotron-3-nano-omni`, HTTP 200; successful live inference |
-| PDF extraction | YELLOW | Deterministic clause extraction verified; extraction timings measured |
-| Hybrid retrieval Recall@1 | YELLOW | 1.00 on 3-query manual evaluation set |
-| Compliance accuracy (9/16) | YELLOW | Based on current labeled evaluation set; deterministic rules conservative by design - "Needs Review" for ambiguous cases |
-| Live eCFR API integration | RED | No network access in this environment |
-| Successful live Nemotron inference | GREEN | Model `nvidia/nemotron-3-nano-omni` at `https://atm.accure.ai/v1`; HTTP 200; successful live inference |
-| Docker runtime execution | RED | Not actually run or build in this environment |
-| Jaeger trace delivery | RED | Version incompatibility; not actually observed |
-| Historical 65% performance claim | RED | Cannot reproduce without eCFR API + LLM pipeline access |
+Measured with the offline harness in `benchmark/compliance_benchmark.py`
+(deterministic LLM stub, network disabled):
 
-## 20. Next Actions
+```text
+24 clauses
+Sequential: ~1.348s
+Concurrent: ~0.112s
+Improvement: ~91.7%
+Concurrency: 12
+Stub latency: 50 ms/clause
+Network: disabled
+```
 
-1. **Fix Jaeger exporter version incompatibility** - install compatible `opentelemetry-exporter-jaeger` package
-2. **Execute Docker build and runtime tests** - `docker build -t cfr-compliance-mcp .` and `docker run`
-3. **Attempt LLM live call with correct model** - if using custom ATM service, verify model `nvidia/nemotron-3-nano-omni` exists there
-4. **Update README** with verified capabilities and clear limitations section
-5. **Run full regression suite** - ensure all fixes don't break existing tests
-1. **Fix Jaeger exporter version incompatibility** - install compatible `opentelemetry-exporter-jaeger` package
-2. **Execute Docker build and runtime tests** - `docker build -t cfr-compliance-mcp .` and `docker run`
-3. **Attempt LLM live call with correct model** - if using custom ATM service, verify model exists there
-4. **Update README** with verified capabilities and clear limitations section
-5. **Run full regression suite** - ensure all fixes don't break existing tests
+This validates concurrency behavior and regression characteristics only. It
+does **not** represent real-world eCFR/network/LLM production latency.
+
+### Historical live benchmark (NOT reproduced)
+
+The project previously measured approximately:
+
+```text
+24 clauses
+Sequential: ~12 minutes
+Optimized: ~4 minutes 10 seconds
+Reduction: ~65%
+```
+
+This is a historical measurement from a previous live run and was **not**
+reproduced during the current deterministic validation. The 65% and 91.7%
+figures measure different things and must never be presented as equivalent.
+
+## Docker verification
+
+- **Build:** `docker build -t cfr-compliance-mcp .` succeeded (Python 3.13
+  slim base; dependencies installed from the committed `uv.lock` via `uv` for
+  reproducibility; non-root `appuser`).
+- **Runtime:** container started and served requests without any credentials:
+  - `GET /health` → `{"status":"healthy","service":"cfr-compliance-mcp","llm_available":"False"}`
+  - `POST /evaluate-clause` → structured NEEDS_REVIEW response with a full
+    `review_audit` (expected: no `cfr_text` supplied, so no evidence-grounded
+    verdict).
+- **Security:** image contains no `.env`, no contract fixtures, and runs as
+  non-root.
+- Live inference / live eCFR retrieval inside the container was not exercised
+  (no external credentials supplied to the test run).
+
+## Known limitations
+
+- AI-assisted compliance analysis is not autonomous legal authorization.
+- NEEDS_REVIEW findings require human judgment.
+- Historical regulation text depends on available eCFR/version support.
+- Live LLM tests depend on external ATM availability and credentials.
+- Synthetic benchmarks do not represent real external network/model latency.
+- Report persistence is filesystem-based, not multi-node distributed
+  persistence.
+- Jaeger trace delivery requires a live Jaeger agent; the application degrades
+  gracefully (logs a warning) when none is present.
+- The eCFR cache is process-local memory; `CACHE_BACKEND=redis` is declared in
+  configuration but intentionally not implemented.

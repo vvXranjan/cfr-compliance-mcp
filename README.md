@@ -1,118 +1,218 @@
 # cfr-compliance-mcp
 
-Production MCP server exposing the official eCFR API as structured tools for contract compliance checking.
+A production-oriented, evidence-grounded AI compliance engineering system for
+evaluating contract clauses against U.S. Code of Federal Regulations (CFR)
+regulations retrieved from the official eCFR API.
+
+> **Disclaimer:** This project provides AI-assisted compliance analysis. It is
+> not a substitute for legal or regulatory professionals. Every non-trivial
+> finding is routed to a human review boundary (NEEDS_REVIEW); nothing in this
+> system autonomously issues legal authorization.
+
+## What it does
+
+Given a contract clause, the system:
+
+1. Applies a shared security gate (prompt-injection detection, text
+   sanitization, CFR title validation).
+2. Runs fast, LLM-free deterministic rules.
+3. Retrieves the relevant regulation text from the official eCFR API
+   (version-aware where supported).
+4. Enriches the result with evidence passages carrying provenance and version
+   metadata.
+5. Evaluates with a compliance agent (Agno + a configurable LLM).
+6. Verifies the result against the evidence.
+7. Returns a structured Pydantic result: **VERIFIED** or **NEEDS_REVIEW**
+   (with a full review audit trail for human follow-up).
 
 ## Architecture
 
-- **MCP server** → eCFR REST API → Agno compliance agent → Nemotron 3-nano-omni via ATM → Pydantic results
-- Deterministic rules filter (LLM-free) → Verification agent → Human review (HITL) for uncertain cases
-- Multi-stage Docker build with non-root user
+```text
+Contract / Clause
+        │
+        ▼
+Security Gate
+        │
+        ▼
+Deterministic Validation
+        │
+        ▼
+CFR / eCFR Retrieval
+        │
+        ▼
+Version-Aware Evidence
+        │
+        ▼
+Compliance Agent
+        │
+        ▼
+Structured Pydantic Result
+        │
+        ▼
+Verification
+        │
+   ┌────┴─────┐
+   ▼          ▼
+VERIFIED   NEEDS_REVIEW
+               │
+               ▼
+          Human Review
+```
 
-## Tech Stack
+## Components
 
-- Python 3.13, FastAPI, FastMCP, Pydantic v2
-- eCFR REST API, agno, OpenAI, Ollama
-- OpenTelemetry, Jaeger (best-effort)
-- pypdf, SequenceMatcher (lexical re-ranking, not dense-vector RAG)
-- Docker (multi-stage, non-root user)
+- **FastMCP** — MCP server exposing the official eCFR API as 8 structured tools
+  (`retrieve_section`, `retrieve_part`, `retrieve_title`, `search_regulations`,
+  `search_by_keyword`, `get_title_structure`, `get_version_history`,
+  `list_agencies`).
+- **eCFR integration** — official `https://www.ecfr.gov` REST/XML API with
+  client-side rate limiting, retries, and an in-process TTL cache
+  (`CACHE_BACKEND=memory`).
+- **Agno / LLM** — compliance agent with structured output via Pydantic. LLM
+  defaults to Nemotron (`nvidia/nemotron-3-nano-omni`) via ATM, with an
+  OpenAI-compatible fallback (`OPENAI_API_KEY`). Ollama is a supported
+  compatible backend.
+- **Deterministic rules** — LLM-free filter producing
+  Compliant / Non-Compliant / Needs Review verdicts with evidence passages.
+- **Evidence provenance** — each evidence passage records its source, retrieval
+  method, timestamp, citation, text span, and version/effective-version
+  metadata; fabrication is guarded by routing ungrounded results to
+  NEEDS_REVIEW.
+- **Verification** — a verification agent cross-checks determinism, evidence
+  coverage, prompt injection, CFR title validity, and version consistency, and
+  recommends accept / review / reject.
+- **HITL boundary** — any uncertainty, failure, or version inconsistency
+  resolves to NEEDS_REVIEW with a `ReviewAudit` (status, reason, timestamps,
+  evidence citations) so a human can review.
+- **REST API** — FastAPI service (`api.py`) exposing `/health`,
+  `/evaluate-clause`, and `/evaluate-bulk`, with structured safe errors.
+- **Report persistence** — `/evaluate-bulk` can persist an auditable JSON
+  report (opt-in via `CFR_REPORTS_DIR`) with atomic writes and
+  path-traversal-safe filenames.
+- **Benchmarking** — a deterministic, offline benchmark harness
+  (`benchmark/`) comparing sequential vs concurrent evaluation.
+- **Observability** — OpenTelemetry HTTP-request tracing with best-effort
+  Jaeger export; structured logging honoring `LOG_LEVEL` / `LOG_FORMAT`.
+- **Docker** — reproducible, minimal image built from the committed `uv.lock`.
 
 ## Setup
 
 ```bash
-uv sync           # install dependencies
-uv run pytest     # run 36 tests
-uv run python -m compileall .  # compile check
+cp .env.example .env       # then fill in credentials
+uv sync --extra dev        # install dependencies + dev tools
+uv run pytest              # run the test suite
 ```
 
-## Running the MCP Server
+Required environment variables (see `.env.example` for the full list):
+
+| Variable | Purpose |
+|---|---|
+| `ATM_API_KEY` | Preferred LLM credential (ATM-hosted Nemotron endpoint) |
+| `OPENAI_API_KEY` | Fallback credential for any OpenAI-compatible endpoint |
+| `ECFR_BASE_URL` | eCFR API base URL (default `https://www.ecfr.gov`) |
+| `CFR_REPORTS_DIR` | Enable report persistence for `/evaluate-bulk` |
+| `CORS_ORIGINS` | Allowed CORS origins for the REST API |
+| `JAEGER_AGENT_HOST` / `JAEGER_AGENT_PORT` | Jaeger agent for tracing (best-effort) |
+
+Never commit a real `.env`; it is git-ignored and excluded from Docker builds.
+
+## Running the MCP server
 
 ```bash
-uv run cfr-compliance-mcp
-# or: uv run python -m cfr_compliance_mcp.server
+uv run cfr-compliance-mcp          # stdio transport (default)
+uv run cfr-compliance-mcp --help   # transport options
 ```
 
-Server starts with stdio transport, registers 8 MCP tools.
+For remote/networked deployment, set `MCP_TRANSPORT=streamable-http` (and
+`MCP_HTTP_HOST` / `MCP_HTTP_PORT`) in the environment.
 
-## API Endpoints
+## Running the REST API
+
+```bash
+uv run uvicorn api:app --host 0.0.0.0 --port 8000
+```
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/health` | GET | Health check |
+| `/health` | GET | Health / readiness check |
 | `/evaluate-clause` | POST | Evaluate a single clause through the full pipeline |
-| `/evaluate-bulk` | POST | Evaluate a batch of clauses |
+| `/evaluate-bulk` | POST | Evaluate a batch of clauses (max 200), optionally persisting a report |
 
-*Structural verification complete; TestClient with Jaeger import issue prevents direct execution in this environment.*
+Interactive docs are available at `/api/docs` and `/api/redoc`.
+
+## Running the benchmark
+
+```bash
+uv run python -m benchmark.compliance_benchmark
+```
+
+The benchmark is deterministic and offline: it uses a stub LLM with simulated
+latency and disabled network access. It validates concurrency behavior and
+regression characteristics — it does **not** represent real production
+eCFR/network/LLM latency.
+
+### Synthetic deterministic benchmark (current, reproducible)
+
+```text
+24 clauses
+Sequential: ~1.348s
+Concurrent: ~0.112s
+Improvement: ~91.7%
+Concurrency: 12
+LLM: deterministic stub
+Simulated latency: 50 ms/clause
+Network: disabled
+```
+
+### Historical live benchmark (NOT reproduced during current validation)
+
+```text
+24 clauses
+Sequential: ~12 minutes
+Optimized: ~4 minutes 10 seconds
+Reduction: ~65%
+```
+
+The 65% figure is a historical measurement from a previous live run and was
+**not** reproduced in the current deterministic validation. The 65% and 91.7%
+numbers measure different things and must never be presented as equivalent.
 
 ## Docker
 
 ```bash
 docker build -t cfr-compliance-mcp .
-# (multi-stage build with non-root user; runtime not tested in this environment)
+docker run --rm -p 8000:8000 -e ATM_API_KEY=... cfr-compliance-mcp
 ```
 
-## Example
+- The image runs the FastAPI service (`api.py`) as a non-root user on port
+  8000. The MCP server runs as a separate process (`uv run cfr-compliance-mcp`)
+  and is not started by the image.
+- The image is built reproducibly from the committed `uv.lock` (via `uv`).
+- `.dockerignore` excludes the local `.env`, virtualenvs, caches, tests,
+  benchmark, the large unreferenced contract PDFs, and other non-runtime
+  files from the build context.
 
-```bash
-# Evaluate a clause
-uv run python -c "
-from agent.models import Clause
-from agent.deterministic_rules import evaluate_deterministic
+## Testing
 
-c = Clause(title='40', text='Contractor shall properly dispose hazardous waste per 257.3')
-result = evaluate_deterministic(c, '257.3 - Standards for hazardous waste land disposal.', 40)
-print(f'Status: {result.status}, Confidence: {result.confidence:.2f}')
-print(f'Evidence: {len(result.evidence)} passage(s)')
-"
-```
+- Non-live tests run offline: `uv run pytest --deselect tests/test_live_llm_integration.py`
+- Live LLM tests require `ATM_API_KEY` and network access to the ATM endpoint:
+  `uv run pytest tests/test_live_llm_integration.py`
+- Lint: `uv run ruff check .`
 
-### VERIFIED
+## Evaluation & Validation
 
-- 39/39 pytest tests pass across 5 consecutive runs
-- Deterministic compliance rules (3 rules, all verdict types: Compliant/Non-Compliant/Needs Review)
-- Evidence-grounded result models with `ComplianceResult.evidence` tracking
-- Version-aware retrieval logic with `CfrMatch.version_payload`
-- Keyword/hierarchy retrieval + `SequenceMatcher` lexical re-ranking (Recall@1 = 1.00 on 3-query manual set)
-- Verification agent with 5 check types (`_check_deterministic_consistency`, `_check_evidence_coverage`, `_check_prompt_injection`, `_check_version_awareness`, `_check_cfr_title_validity`)
-- Prompt-injection protection (19 regex patterns)
-- Text sanitization (`sanitize_clause_text`) and CFR title validation (1-50)
-- FastAPI endpoint structure (`/health`, `/evaluate-clause`, `/evaluate-bulk`)
-- OpenTelemetry instrumentation (9/9 checks pass; Jaeger graceful degradation)
-- Dockerfile multi-stage build (non-root user confirmed in source)
-- PDF clause extraction from sample contracts (deterministic: `sample_contract.pdf` → 9 clauses, `sample_contract_multi.pdf` → 24 clauses)
-- Repeated regression stability (5 consecutive pytest runs: 39/39; 105/105 randomized deterministic; 100/100 randomized security; 50/50 randomized CFR/retrieval)
-- Randomized regression testing framework
+See `docs/CLAIMS_EVIDENCE.md` for claim-by-claim evidence and
+`docs/VALIDATION_REPORT.md` for the validation report, and
+`docs/HANDOFF.md` for operational handoff details.
 
-### EXPERIMENTALLY VERIFIED
+## Known limitations
 
-- PDF → deterministic compliance pipeline (offline, clause extraction verified at ~0.04ms/clause)
-- Offline E2E execution (deterministic rules + security + retrieval tested without live eCFR/LLM)
-- Randomized retrieval/security testing (105 deterministic + 100 security + 50 CFR regression cases all pass)
-- Measured deterministic performance (~0.04 ms/clause, LLM-free filter)
-
-### ENVIRONMENT-LIMITED / UNVERIFIED
-
-- Live eCFR API integration (no network access in this environment)
-- Docker runtime execution (multi-stage build confirmed in source; container not actually run in this environment)
-- Jaeger trace delivery (version incompatibility; application degrades gracefully when Jaeger unavailable; traces configured but not verifiable without running Jaeger)
-- Historical 65% performance claim ("12 min → 4 min 10 sec") (cannot reproduce without eCFR API + LLM pipeline access)
-- Full end-to-end LLM pipeline with live eCFR data
-
-### VERIFIED (Live)
-
-- Live Nemotron inference through ATM: verified via `https://atm.accure.ai/v1`, model `nvidia/nemotron-3-nano-omni`, HTTP 200, successful inference
-- Authentication verified: `ATM_API_KEY` environment variable based
-- PDF extraction benchmarking per contract
-
-## Claim Verification
-
-See `docs/CLAIMS_EVIDENCE.md` for detailed claim-by-claim evidence and status.
-
-See `docs/VALIDATION_REPORT.md` for the full validation report.
-
-## Evaluation Methodology
-
-- Deterministic rules: fast LLM-free filter (~0.04ms/clause)
-- Hybrid retrieval: keyword search + `SequenceMatcher` lexical re-ranking (Recall@1 = 1.00)
-- Compliance evaluation: 16 manual test cases across 7 categories
-- Security: 19 prompt injection patterns + text sanitization + title validation
-- LLM integration: **Live Nemotron inference verified** via ATM `https://atm.accure.ai/v1`, model `nvidia/nemotron-3-nano-omni`, HTTP 200, successful inference. Framework verified; live call SUCCESSFUL.
+- AI-assisted compliance analysis is not autonomous legal authorization.
+- NEEDS_REVIEW findings require human judgment.
+- Historical regulation text depends on available eCFR version support.
+- Live LLM tests depend on external ATM availability and credentials.
+- Synthetic benchmarks do not represent real external network/model latency.
+- Report persistence is filesystem-based, not multi-node distributed
+  persistence.
+- The eCFR cache is process-local memory (`CACHE_BACKEND=memory`); Redis is
+  declared in configuration but not implemented.

@@ -52,11 +52,10 @@ from agent.security import (
     validate_cfr_title,
 )
 from agent.verification_agent import verify_compliance
+from cfr_compliance_mcp.logging_config import configure_logging
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
+# Honor LOG_LEVEL / LOG_FORMAT from Settings (shared with the MCP server).
+configure_logging()
 
 logger = logging.getLogger(__name__)
 
