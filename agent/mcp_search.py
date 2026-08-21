@@ -455,9 +455,9 @@ async def _fetch_version_history(
     includes issue dates and version identifiers. Callers can determine
     the effective version for a specific contract date from this data.
 
-    Note: this is a new addition - the existing `get_version_history`
-    MCP tool already wraps this client method, so this function provides
-    direct access for the version-aware retrieval flow.
+    Note: the existing `get_version_history` MCP tool wraps this same
+    client method; this function provides direct access for the
+    version-aware retrieval flow.
     """
     args: dict[str, Any] = {"title": title}
     if part is not None:

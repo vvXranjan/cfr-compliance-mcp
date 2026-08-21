@@ -298,6 +298,16 @@ class TestAnalysisHistoryAPI:
         assert body["total"] == 1
         assert body["items"][0]["analysis_id"]
 
+    def test_invalid_status_filter_rejected(self, monkeypatch) -> None:
+        client, _ = self._client(monkeypatch)
+        assert client.get("/analyses?status=not_a_status").status_code == 422
+
+    def test_invalid_pagination_bounds_rejected(self, monkeypatch) -> None:
+        client, _ = self._client(monkeypatch)
+        assert client.get("/analyses?limit=0").status_code == 422
+        assert client.get("/analyses?limit=999999").status_code == 422
+        assert client.get("/analyses?offset=-1").status_code == 422
+
     def test_list_pagination(self, monkeypatch) -> None:
         client, repo = self._client(monkeypatch)
         _seed(repo)

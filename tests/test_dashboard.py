@@ -237,3 +237,20 @@ class TestSummarize:
         m = InMemoryRepository().summarize()
         assert m.total_analyses == 0
         assert m.review_pending == 0
+
+
+class TestEscaping:
+    def test_reviewer_input_is_html_escaped(self, client) -> None:
+        c, _, aid = client
+        r = c.post(
+            f"/dashboard/reviews/{aid}/abc12345/decide",
+            data={"target_state": "under_review", "reason": "<script>alert(1)</script>",
+                  "reviewer_identity": "<img src=x onerror=alert(2)>", "expected_version": "1"},
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+        body = c.get(f"/dashboard/reviews/{aid}/abc12345").text
+        assert "<script>alert(1)</script>" not in body
+        assert "<img src=x" not in body
+        assert "&lt;script&gt;" in body
+        assert "&lt;img" in body
