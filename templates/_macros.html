@@ -1,0 +1,33 @@
+{# Shared dashboard display macros #}
+
+{% macro status_badge(status) -%}
+{%- if status == 'Compliant' -%}<span class="badge b-compliant">Compliant</span>
+{%- elif status == 'Non-Compliant' -%}<span class="badge b-non">Non-Compliant</span>
+{%- elif status == 'Needs Review' -%}<span class="badge b-review">Needs Review</span>
+{%- else -%}<span class="badge b-soft">{{ status }}</span>{%- endif -%}
+{%- endmacro %}
+
+{% macro verification_badge(vs) -%}
+{%- if vs == 'verified' -%}<span class="badge b-verified">verified</span>
+{%- elif vs == 'needs_review' -%}<span class="badge b-review">needs review</span>
+{%- else -%}<span class="badge b-soft">{{ vs }}</span>{%- endif -%}
+{%- endmacro %}
+
+{# Advisory Compliance Memory participation -- always labeled, never law #}
+{% macro memory_badge(flag) -%}
+{%- if flag -%}<span class="badge b-mem" title="Advisory historical context; not regulatory truth">memory</span>{%- endif -%}
+{%- endmacro %}
+
+{% macro review_state_badge(state) -%}
+<span class="badge b-state">{{ state or 'none' }}</span>
+{%- endmacro %}
+
+{% macro pagination(filter_value, limit, offset, param='status') -%}
+{%- set q = ('&' ~ param ~ '=' ~ filter_value) if filter_value else '' -%}
+<nav class="pagination" aria-label="Pagination">
+  {% if has_prev %}<a class="btn btn-subtle" href="?limit={{ limit }}&offset={{ prev_offset }}{{ q }}">&larr; Prev</a>{% else %}<span class="btn btn-subtle" aria-disabled="true">&larr; Prev</span>{% endif %}
+  <span>Page {{ page }} of {{ pages }}</span>
+  {% if has_next %}<a class="btn btn-subtle" href="?limit={{ limit }}&offset={{ next_offset }}{{ q }}">Next &rarr;</a>{% else %}<span class="btn btn-subtle" aria-disabled="true">Next &rarr;</span>{% endif %}
+  <span class="info">{{ total }} total</span>
+</nav>
+{%- endmacro %}

@@ -21,5 +21,15 @@ build/
 .idea/
 .DS_Store
 
+# --- Runtime data (local, never committed) ---
+reports/
+memory/
+
+# --- Internal development/process documentation (kept locally, not published) ---
+docs/HANDOFF.md
+docs/CLAIMS_EVIDENCE.md
+docs/VALIDATION_REPORT.md
+HANDOFF/
+
 # NOTE: uv.lock is intentionally NOT ignored — it must be committed
 # for reproducible installs across machines/CI.

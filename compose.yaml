@@ -1,0 +1,61 @@
+# Local production-style stack: application + PostgreSQL.
+#
+# Usage:
+#   cp .env.example .env      # optional; values below have defaults
+#   docker compose up -d --build
+#   open http://localhost:8000/dashboard
+#
+# No secrets are hard-coded here. Values are read from the environment
+# (e.g. `.env`) with safe defaults for local development. PostgreSQL data
+# persists in the named `pgdata` volume. Migrations run once via the
+# `migrate` service before the app starts.
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cfr}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cfr}
+      POSTGRES_DB: ${POSTGRES_DB:-cfr}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cfr} -d ${POSTGRES_DB:-cfr}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  migrate:
+    build: .
+    command: ["python", "scripts/migrate.py"]
+    environment:
+      CFR_DATABASE_URL: postgresql://${POSTGRES_USER:-cfr}:${POSTGRES_PASSWORD:-cfr}@db:5432/${POSTGRES_DB:-cfr}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      CFR_PERSISTENCE_BACKEND: postgres
+      CFR_DATABASE_URL: postgresql://${POSTGRES_USER:-cfr}:${POSTGRES_PASSWORD:-cfr}@db:5432/${POSTGRES_DB:-cfr}
+      CORS_ORIGINS: "*"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health/ready')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  pgdata:

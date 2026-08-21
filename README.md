@@ -1,170 +1,315 @@
-# CFR Compliance Checker
+# CFR Compliance MCP
 
-AI-assisted compliance checking system that takes a contract PDF, extracts its clauses, retrieves the relevant CFR (Code of Federal Regulations) sections through a custom eCFR MCP server, and evaluates each clause's compliance using an LLM agent.
+> An agentic compliance analysis system that evaluates contract clauses against
+> authoritative U.S. federal regulations using MCP-based retrieval, deterministic
+> rules, LLM reasoning, evidence verification, durable memory, human review
+> workflows, and production-ready persistence.
 
-## Overview
+---
 
-This project has two independent layers:
+## Why This Project
 
-- **MCP Server** (`src/cfr_compliance_mcp/`) — wraps the official [eCFR REST API](https://www.ecfr.gov/) and exposes it as a set of [MCP](https://modelcontextprotocol.io/) tools (search, section/part/title retrieval, version history, agency lookup).
-- **Agent Pipeline** (`agent/`) — parses a contract PDF into clauses, builds an optimized CFR search query for each clause, retrieves the matching regulation via the MCP server, and runs an LLM-based compliance evaluation.
+LLMs are powerful, but they should not be allowed to freely invent regulatory
+evidence or autonomously execute high-stakes decisions.
 
-The agent layer never talks to eCFR directly — all retrieval goes through the MCP server as an MCP client.
+This system demonstrates a **controlled AI architecture** where:
+
+- **authoritative regulatory retrieval comes first** — current CFR text is the
+  only source of regulatory truth
+- **deterministic checks constrain the workflow** — LLM-free rules provide fast,
+  auditable verdicts before any model is consulted
+- **LLM reasoning is evidence-grounded** — the model must cite only the provided
+  regulation, and provenance is attached by the retrieval layer, never the model
+- **verification gates uncertain outputs** — conflicts and ungrounded results
+  resolve to `NEEDS_REVIEW`, never silent acceptance
+- **historical memory is advisory** — prior outcomes are context, not law, and
+  can never override the current regulation
+- **humans control unresolved decisions** — an explicit review lifecycle
+  preserves the original automated result and an immutable audit trail
+- **persistence and audit trails make every decision inspectable** — via
+  filesystem or optional PostgreSQL, with a review dashboard
+
+## Key Capabilities
+
+- MCP-based retrieval of the official **eCFR** API (8 typed tools)
+- Configurable **LLM evaluation** via an OpenAI-compatible endpoint
+- Deterministic compliance rules (LLM-free, auditable)
+- Evidence grounding + independent **verification**
+- **Prompt-injection defenses** and security boundaries
+- **Advisory compliance memory** with durable JSONL storage
+- Immutable analysis snapshots
+- **Optional PostgreSQL** backend with versioned SQL migrations
+- Queryable **analysis history**
+- **Human-in-the-loop review** with optimistic concurrency
+- **Immutable audit events**
+- Server-rendered **Jinja2 dashboard**
+- **Docker + Docker Compose** deployment
+- Liveness and readiness endpoints
+- Comprehensive offline + PostgreSQL integration + live LLM test suites
+
+## Architecture
+
+```mermaid
+flowchart TD
+    C[Contract / Clause] --> S[Security Boundary]
+    S --> R[Authoritative eCFR Retrieval]
+    R --> M[Memory Lookup<br/>Advisory only]
+    M --> D[Deterministic Evaluation]
+    D --> L[LLM Evaluation]
+    L --> V[Verification]
+    V -->|uncertain| NR[NEEDS_REVIEW]
+    V -->|verified| OK[VERIFIED]
+    NR --> HR[Human Review]
+    OK --> P[Persistence]
+    HR --> P
+    P -->|File| F[FileRepository - JSON reports]
+    P -->|Optional PostgreSQL| PG[PostgresRepository - history + review]
+```
+
+Compliance Memory is drawn below retrieval on purpose: it is **advisory
+context** that can influence an evaluation, but it is never authoritative
+regulatory evidence and can never reorder the hierarchy.
+
+## Core Engineering Decisions
+
+### Authoritative Retrieval Before Reasoning
+
+The pipeline runs security → retrieval → deterministic rules → LLM → verification.
+Regulatory text is always fetched and made usable before any reasoning begins.
+If retrieval fails, the clause resolves to `NEEDS_REVIEW` — the system will not
+guess.
+
+### LLMs Do Not Control Evidence Provenance
+
+The model is instructed to reference **only** the provided regulation text, and
+evidence provenance (`source`, `retrieved_at`, `retrieval_method`, `version`) is
+attached by the retrieval layer. The model never manufactures where evidence
+came from; ungrounded output is routed to review.
+
+### Compliance Memory Is Advisory
+
+Verified historical outcomes are stored in an append-only JSONL store and can be
+surfaced as labeled `HISTORICAL_CONTEXT` (data, never instructions). Memory:
+
+- never establishes or replaces a CFR requirement
+- is injected only into the user prompt, never the system instructions
+- cannot trigger a verdict reuse unless current authoritative retrieval is usable
+- is **not** auto-indexed when it participated (prevents feedback loops)
+
+### Human Review Does Not Overwrite Automated Results
+
+A reviewer decision transitions an explicit lifecycle and appends an immutable
+event; it never rewrites the original `ComplianceResult`, evidence, or audit
+trail.
+
+### PostgreSQL Is Optional
+
+`file` is the default and fully self-contained. PostgreSQL is an explicit opt-in
+that adds queryable history and the review workflow. There is **no silent
+fallback** — misconfiguration fails clearly.
+
+### Fail-Open vs Fail-Fast Boundaries
+
+- **Evaluation path**: optional persistence/memory failures are logged and
+  never fail a successful compliance analysis (fail-open).
+- **Configuration path**: an invalid backend or unreachable configured database
+  fails fast rather than silently degrading (fail-fast).
+
+## Human-in-the-Loop Review
 
 ```
-Contract PDF
-     │
-     ▼
-Contract Parser ──▶ Clauses
-     │
-     ▼
-Query Optimizer ──▶ Optimized Query
-     │
-     ▼
-MCP Search (search_regulations → retrieve_section) ──▶ MCP Server ──▶ eCFR REST API
-     │
-     ▼
-Compliance Agent (Agno + Ollama / Llama 3.1)
-     │
-     ▼
-Compliance Result (status, confidence, reason)
+NEEDS_REVIEW
+    ↓
+UNDER_REVIEW
+    ↓
+APPROVED / REJECTED / ESCALATED
 ```
 
-## Features
+- **Optimistic concurrency** — a decision carries an `expected_version`; a stale
+  write is rejected instead of overwriting another reviewer.
+- **Immutable decision events** — every transition is appended to an audit log.
+- **Original results preserved** — the automated result, evidence, and audit are
+  never modified by review.
 
-- **Custom eCFR MCP server** built on FastMCP, with async HTTP client, XML parsing, caching, and typed request/response models.
-- **Deterministic query optimizer** — detects a clause's regulatory domain (environmental, safety, employment, labor, procurement) and predicts likely CFR titles before retrieval, without an LLM call.
-- **Compliance agent** built with [Agno](https://github.com/agno-agi/agno) running on local [Ollama](https://ollama.com/) (Llama 3.1), returning a validated Pydantic `ComplianceResult` (status, confidence, reason).
-- **End-to-end pipeline** that runs a contract PDF through extraction, retrieval, and compliance evaluation with no manual intervention between steps.
+## Dashboard
 
-## MCP Tools
+A server-rendered Jinja2 dashboard is served by the API at `/dashboard`:
 
-| Tool | Purpose |
-|---|---|
-| `search_regulations` | Search eCFR content for a query, returning candidate matches |
-| `retrieve_section` | Retrieve the full text of a specific CFR section |
-| `retrieve_part` | Retrieve a specific CFR part |
-| `retrieve_title` | Retrieve a specific CFR title |
-| `get_title_structure` | Retrieve the hierarchical structure of a CFR title |
-| `get_version_history` | Retrieve version/revision history for CFR content |
-| `list_agencies` | Retrieve the list of agencies with CFR content |
+- **Overview** — aggregate compliance metrics and recent analyses
+- **Analysis history** — paginated, filterable list with click-through
+- **Analysis detail** — clause results, authoritative CFR evidence, verification,
+  audit, and memory-participation indicator
+- **Review queue** — actionable `NEEDS_REVIEW` items with state filters
+- **Review detail** — automated result, evidence, verification/audit, memory
+  context, immutable decision history, and a decision form (valid transitions
+  only)
+
+Authoritative CFR evidence and advisory historical memory are visually distinct
+— memory is never presented as regulation. No screenshots are bundled; run the
+app and visit `/dashboard`.
+
+## Quick Start
+
+Prerequisites: Python 3.12+, `uv`, and a working `eCFR` connection. An LLM key is
+only needed for the LLM-fallback evaluation step.
+
+### File persistence (default)
+
+```bash
+cp .env.example .env       # fill in credentials if desired
+uv sync --extra dev
+uv run uvicorn api:app --host 0.0.0.0 --port 8000
+open http://localhost:8000/dashboard
+```
+
+Enable on-disk report persistence by setting `CFR_REPORTS_DIR=reports` in `.env`.
+
+### PostgreSQL (opt-in)
+
+```bash
+# 1. Configure the backend + DSN
+CFR_PERSISTENCE_BACKEND=postgres
+CFR_DATABASE_URL=postgresql://user:pass@host/db
+
+# 2. Apply the versioned schema (idempotent, safe to re-run)
+uv run python scripts/migrate.py --dsn "$CFR_DATABASE_URL"
+
+# 3. Start the API (fails fast at startup if the DB is unreachable)
+uv run uvicorn api:app --host 0.0.0.0 --port 8000
+```
+
+### Docker Compose (reproducible local stack)
+
+```bash
+docker compose up -d --build
+open http://localhost:8000/dashboard
+```
+
+The Compose stack runs the app + PostgreSQL 16 with a named volume, a one-shot
+migration service, and health checks. The app waits for migrations to complete.
+
+## Environment Variables
+
+| Variable | Requirement | Purpose |
+|---|---|---|
+| `ATM_API_KEY` | Optional (LLM) | Preferred credential for the LLM evaluation step |
+| `ATM_BASE_URL` | Optional | LLM endpoint (default `https://atm.accure.ai/v1`) |
+| `ATM_MODEL` | Optional | LLM model (default Nemotron) |
+| `OPENAI_API_KEY` | Optional | Fallback OpenAI-compatible credential |
+| `ECFR_BASE_URL` | Optional | eCFR API base URL |
+| `CFR_REPORTS_DIR` | Optional (file backend) | Enable report persistence |
+| `CFR_PERSISTENCE_BACKEND` | Backend-specific | `file` (default) or `postgres` |
+| `CFR_DATABASE_URL` | Backend-specific | PostgreSQL connection string |
+| `CFR_MEMORY_ENABLED` | Optional | Enable advisory Compliance Memory |
+| `CFR_MEMORY_DIR` | Optional | Memory store directory |
+| `CORS_ORIGINS` | Optional | Allowed CORS origins |
+| `JAEGER_AGENT_HOST`/`PORT` | Optional | Best-effort tracing export |
+
+Never commit a real `.env`; it is git-ignored and excluded from Docker builds.
+
+## API Endpoints
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/health` | GET | Liveness check |
+| `/health/ready` | GET | Readiness (reflects backend usability) |
+| `/evaluate-clause` | POST | Evaluate a single clause |
+| `/evaluate-bulk` | POST | Evaluate a batch (max 200), optionally persist |
+| `/analyses` | GET | Paginated analysis history |
+| `/analyses/{analysis_id}` | GET | Full immutable report |
+| `/reviews` | GET | Review queue (defaults to actionable) |
+| `/reviews/{analysis_id}/{clause_id}` | GET | Full review view |
+| `/reviews/{analysis_id}/{clause_id}/decide` | POST | Record a review decision |
+| `/dashboard` | GET | Server-rendered review dashboard |
+| `/api/docs` | GET | Interactive OpenAPI docs |
+
+## Testing
+
+```bash
+# Offline suite (no external services required)
+uv run pytest --deselect tests/test_live_llm_integration.py -q
+
+# Optional PostgreSQL integration tests (clean-skip without a test DB)
+CFR_TEST_DATABASE_URL=postgresql://user:pass@host/db uv run pytest tests/test_postgres_integration.py
+
+# Live LLM tests (require an LLM key + network)
+uv run pytest tests/test_live_llm_integration.py
+
+# Lint
+uv run ruff check .
+```
+
+Current validation: **268 offline tests**, 9 PostgreSQL integration tests
+(clean-skip when unavailable), and 9 live LLM tests.
 
 ## Project Structure
 
-```
+```text
 agent/
-├── contract_parser.py          # Extracts text from a contract PDF, splits into clauses
-├── cfr_query_optimizer.py      # Deterministic domain detection + query optimization
-├── mcp_search.py                # MCP client: search_regulations + retrieve_section
-├── compliance_agent.py          # Agno/Ollama compliance evaluation, structured output
-├── compliance_pipeline.py       # Orchestrates the full clause-by-clause workflow
-└── models.py                    # Shared data models (clauses, ComplianceResult, etc.)
-
-src/cfr_compliance_mcp/
-├── clients/                     # Async HTTP client for the eCFR API
-├── parsing/                     # XML parsing for eCFR API responses
-├── tools/                       # MCP tool implementations
-└── server.py                    # FastMCP server setup, tool registration, caching
-
-contracts/
-└── sample_contract.pdf          # Sample contract for manual/end-to-end testing
-
-tests/
-├── test_optimizer_manual.py
-└── test_compliance_agent_manual.py
+  compliance_pipeline.py   # orchestration + authority order
+  compliance_agent.py      # LLM evaluation
+  security.py              # prompt-injection + input defenses
+  deterministic_rules.py   # LLM-free rules
+  verification_agent.py    # evidence/consistency verification
+  memory.py / memory_store.py  # advisory compliance memory
+  reporting.py             # report persistence
+  persistence/             # File / Postgres / in-memory repositories + review lifecycle
+api.py                     # FastAPI service
+dashboard.py               # server-rendered dashboard routes
+templates/ static/         # dashboard UI
+migrations/ scripts/       # SQL migrations + migration runner
+src/cfr_compliance_mcp/    # FastMCP server + eCFR client + tools
+tests/                     # offline, integration, live suites
+benchmark/                 # deterministic benchmark harness
+compose.yaml  Dockerfile  pyproject.toml  uv.lock
 ```
 
 ## Tech Stack
 
-- Python 3.13
-- [FastMCP](https://gofastmcp.com/) — MCP server framework
-- [Agno](https://github.com/agno-agi/agno) — agent framework with structured (Pydantic) output
-- [Ollama](https://ollama.com/) (Llama 3.1) — local LLM runtime
-- Pydantic v2 — validation and typed models
-- [uv](https://docs.astral.sh/uv/) — dependency management and running project modules
+**AI / LLM** — FastMCP, eCFR retrieval, deterministic rules, configurable
+OpenAI-compatible LLM, verification, advisory memory
 
-## Setup
+**Backend** — Python 3.12+, FastAPI, Pydantic v2, httpx, structured logging
 
-1. Install dependencies:
-   ```bash
-   uv sync
-   ```
-2. Install and run [Ollama](https://ollama.com/) locally, and pull the model:
-   ```bash
-   ollama pull llama3.1
-   ```
-3. Copy `.env.example` to `.env` and fill in any required configuration.
+**Persistence** — filesystem JSON reports (default) + optional PostgreSQL
+(`psycopg 3`, versioned SQL migrations)
 
-## Usage
+**Infrastructure** — Docker, Docker Compose, health/readiness endpoints
 
-Run the full pipeline against the sample contract:
+**Testing** — pytest, offline + optional PostgreSQL integration + live LLM
 
-```bash
-uv run python -m agent.compliance_pipeline
-```
+## What This Project Demonstrates
 
-Run the contract parser / clause extraction step on its own:
+- **Agentic AI system design** — a full retrieval → reason → verify → decide
+  pipeline with explicit boundaries
+- **MCP tool integration** — a typed server wrapping a real regulatory API
+- **LLM orchestration** — deterministic + probabilistic control flow
+- **Retrieval and evidence grounding** — provenance-first design
+- **AI security boundaries** — prompt-injection defense and input sanitization
+- **Human-in-the-loop workflows** — explicit review lifecycle with audit
+- **Transactional persistence** — optimistic concurrency and immutable events
+- **API engineering** — validated request/response models, structured errors
+- **Dockerized deployment** — reproducible builds and a Compose stack
+- **Testing and integration validation** — offline, PostgreSQL, and live suites
 
-```bash
-uv run python -m agent.workflow
-```
+## Current Limitations
 
-Run the manual test suites:
-
-```bash
-uv run python -m tests.test_optimizer_manual
-uv run python -m tests.test_compliance_agent_manual
-```
-
-## Sample Result
-
-For the clause `SECTION 2. HAZARDOUS MATERIALS HANDLING`, the pipeline correctly matched **40 CFR 262.84** (hazardous waste generator standards) and returned:
-
-| Field | Value |
-|---|---|
-| Status | Compliant |
-| Confidence | 0.80 |
-| Reason | The retrieved regulation matched the contract clause and the compliance agent produced a structured compliance assessment. |
-
-## Current Capabilities
-
-- Parse a contract PDF and extract its text
-- Split contract text into individual, structured clauses
-- Deterministically optimize a CFR search query per clause, based on detected regulatory domain
-- Search official eCFR content via the custom MCP server
-- Retrieve the matched CFR section's full text
-- Evaluate clause-vs-regulation compliance using an LLM agent with structured, validated output
-- Produce a per-clause compliance result (status, confidence, reason) tied back to the correct clause title
-
-## Known Limitations
-
-- No automated CI test suite — testing is currently via manual scripts only
-- No multi-clause batch reporting (single clause per run)
-- No PDF/Markdown compliance report export
-- No ranking mechanism when `search_regulations` returns multiple plausible candidates — current behavior is best-result selection
-- No support yet for clauses governed by more than one CFR section
+- `reviewer_identity` is an unauthenticated placeholder (no auth system yet)
+- PostgreSQL is single-instance (no distributed orchestration)
+- Live LLM tests depend on external provider availability
+- Compliance Memory is intentionally local and advisory
+- The system does not automatically execute remediation
 
 ## Roadmap
 
-- [ ] Multi-clause contract reports (aggregate results across all clauses)
-- [ ] PDF/Markdown compliance report export
-- [ ] Improved retrieval ranking for multiple plausible candidates
-- [ ] Support for multiple CFR references per clause
-- [ ] Automated evaluation metrics against a labeled test set
-- [ ] Automated unit/integration test suite runnable in CI
-- [ ] REST API / UI for the pipeline
-- [ ] Normalize LLM confidence values (e.g., convert `95` → `0.95` before validation)
-- [ ] Detect clauses with no applicable CFR regulation and skip unnecessary retrieval
-- [ ] Retrieval explainability (optimized query, predicted CFR title, matched keywords, retrieval score)
+- Authenticated reviewer identities and role-based access control
+- Production observability and richer audit reporting
+- Background job processing for long-running evaluations
+- A broader, versioned compliance benchmark suite
+- Multi-node deployment support
 
-## Branching
+---
 
-| Branch | Purpose |
-|---|---|
-| `main` | Stable, production/reference branch |
-| `development` | Active integration branch |
-| `improve-retrieval-ranking` | Feature branch for retrieval optimization and compliance-agent work |
-
-## Author
-
-Vaibhav Vikas Ranjan
+*AI-assisted compliance analysis is not a substitute for legal or regulatory
+professionals. Non-trivial findings are routed to human review; nothing in this
+system autonomously issues legal authorization.*

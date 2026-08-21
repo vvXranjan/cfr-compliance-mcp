@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% from "_macros.html" import review_state_badge, pagination with context %}
+{% block title %}Review Queue · CFR Compliance Dashboard{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Human Review Queue</h1>
+  <div class="sub">Review-required findings awaiting an explicit human decision.</div>
+</div>
+
+{% if unsupported %}
+<div class="alert alert-warn" role="alert">
+  The human review workflow requires the PostgreSQL persistence backend.
+  Set <code class="mono">CFR_PERSISTENCE_BACKEND=postgres</code> and apply the schema
+  (<code class="mono">uv run python scripts/migrate.py</code>) to enable review.
+</div>
+<div class="empty">
+  <div class="icon" aria-hidden="true">&#128737;</div>
+  <h3>Review workflow not enabled</h3>
+  <p>The current <strong>{{ backend_label }}</strong> backend does not support the review queue.
+  Enable PostgreSQL to review NEEDS_REVIEW findings.</p>
+</div>
+{% else %}
+<div class="filters" role="group" aria-label="Filter review queue by state">
+  <a class="chip {{ 'active' if state == 'needs_review' else '' }}" href="/dashboard/reviews">needs_review</a>
+  <a class="chip {{ 'active' if state == 'under_review' else '' }}" href="/dashboard/reviews?state=under_review">under_review</a>
+  <a class="chip {{ 'active' if state == 'approved' else '' }}" href="/dashboard/reviews?state=approved">approved</a>
+  <a class="chip {{ 'active' if state == 'rejected' else '' }}" href="/dashboard/reviews?state=rejected">rejected</a>
+  <a class="chip {{ 'active' if state == 'escalated' else '' }}" href="/dashboard/reviews?state=escalated">escalated</a>
+</div>
+
+{% if items %}
+<div class="table-wrap">
+  <table class="data">
+    <thead>
+      <tr><th>State</th><th>Clause</th><th>Original status</th><th>Verification</th><th>Version</th><th>Reviewer</th><th>Decided</th></tr>
+    </thead>
+    <tbody>
+      {% for it in items %}
+      <tr>
+        <td>{{ review_state_badge(it.review_state) }}</td>
+        <td>
+          <a href="/dashboard/reviews/{{ it.analysis_id }}/{{ it.clause_id }}">{{ it.clause_title or it.clause_id }}</a>
+          <div class="muted mono" style="font-size: var(--fs-xs)">{{ it.analysis_id }} · {{ it.clause_id }}</div>
+        </td>
+        <td><span class="badge b-soft">{{ it.original_status }}</span></td>
+        <td class="muted">{{ it.verification_status or '—' }}</td>
+        <td class="num">{{ it.version }}</td>
+        <td>{{ it.reviewer_identity or '—' }}</td>
+        <td class="muted nowrap">{{ it.decided_at or '—' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{{ pagination(state, limit, offset, param='state') }}
+{% else %}
+<div class="empty">
+  <div class="icon" aria-hidden="true">&#128994;</div>
+  <h3>No items in this state</h3>
+  <p>There are no review items in the <strong>{{ state }}</strong> state.</p>
+</div>
+{% endif %}
+{% endif %}
+{% endblock %}

@@ -16,6 +16,21 @@ dependencies = [
     "pydantic-settings>=2.3",
     "tenacity>=8.3",
     "python-dotenv>=1.0",
+    "pypdf>=6.14.2",
+    "agno>=2.7.2",
+    "openai>=2.45.0",
+    "ollama>=0.6.2",
+    "requests>=2.34.2",
+    # REST API service (api.py) runtime requirements.
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    # OpenTelemetry tracing (api.py imports these unconditionally).
+    "opentelemetry-api>=1.25",
+    "opentelemetry-sdk>=1.25",
+    "opentelemetry-instrumentation-fastapi>=0.45b0",
+    "opentelemetry-exporter-jaeger-thrift>=1.21",
+    "psycopg[binary]>=3.3.4",
+    "jinja2>=3.1",
 ]
 
 [project.optional-dependencies]

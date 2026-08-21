@@ -1,0 +1,44 @@
+# --- Git ---------------------------------------------------------------
+.git
+.gitignore
+
+# --- Secrets / local environment ---------------------------------------
+# The real .env is never allowed into the build context. .env.example is
+# kept (it contains no secrets and documents the config surface).
+.env
+.env.*
+!.env.example
+
+# --- Virtualenvs -------------------------------------------------------
+.venv
+venv
+
+# --- Python bytecode / caches ------------------------------------------
+__pycache__/
+*.pyc
+*.pyo
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+*.egg-info/
+
+# --- Local runtime outputs (never build-time inputs) -------------------
+reports/
+
+# --- Non-runtime directories (dev/test/docs) ---------------------------
+tests/
+benchmark/
+# scripts/ contains dev-only helpers; only the migration runner is runtime.
+scripts/*
+!scripts/migrate.py
+HANDOFF/
+docs/
+.vscode/
+.idea/
+.DS_Store
+
+# --- Large contract fixtures (not runtime dependencies) ----------------
+# The API service evaluates clauses from the request body; contract PDFs
+# are only used by CLI demo/benchmark paths and are not needed in the
+# image. Excluding them keeps the build context small.
+contracts/
