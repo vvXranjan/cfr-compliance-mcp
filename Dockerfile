@@ -41,7 +41,13 @@ ENV PATH="/app/.venv/bin:$PATH"
 
 # Application modules that are not part of the installed package.
 COPY agent/ ./agent/
-COPY api.py ./
+COPY api.py dashboard.py ./
+COPY templates/ ./templates/
+COPY static/ ./static/
+
+# Migration runner + schema are needed for the optional PostgreSQL backend.
+COPY scripts/ ./scripts/
+COPY migrations/ ./migrations/
 
 # Writable report directory for CFR_REPORTS_DIR persistence.
 RUN mkdir -p /app/reports && chown -R appuser:appuser /app

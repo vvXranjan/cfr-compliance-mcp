@@ -207,9 +207,9 @@ class TestBackendSelection:
         assert Settings().cfr_persistence_backend == "file"
         assert get_persistence_repository().backend == "file"
 
-    def test_postgres_backend_fails_clearly(self) -> None:
-        settings = Settings(cfr_persistence_backend="postgres")
-        with pytest.raises(ValueError, match="not implemented"):
+    def test_postgres_backend_without_dsn_fails_clearly(self) -> None:
+        settings = Settings(cfr_persistence_backend="postgres", cfr_database_url="")
+        with pytest.raises(ValueError, match="CFR_DATABASE_URL"):
             get_persistence_repository(settings)
 
     def test_unknown_backend_is_rejected(self) -> None:

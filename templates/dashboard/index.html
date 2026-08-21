@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% from "_macros.html" import status_badge %}
+{% block title %}Overview · CFR Compliance Dashboard{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Compliance Overview</h1>
+  <div class="sub">Operational summary of persisted compliance analyses.</div>
+</div>
+
+{% if metrics.total_analyses == 0 %}
+<div class="empty">
+  <div class="icon" aria-hidden="true">&#128202;</div>
+  <h3>No compliance analyses yet</h3>
+  <p>Persisted analysis results will appear here once an evaluation has been submitted and stored.</p>
+  <ol>
+    <li>Submit a bulk evaluation through the API (<code class="mono">POST /evaluate-bulk</code>).</li>
+    <li>Persisted results will appear here as analysis history.</li>
+    <li>Enabling PostgreSQL unlocks the human review workflow.</li>
+  </ol>
+</div>
+{% else %}
+<div class="stats" role="list" aria-label="Compliance summary">
+  <div class="stat" role="listitem">
+    <div class="label">Total Analyses</div>
+    <div class="value">{{ metrics.total_analyses }}</div>
+  </div>
+  <div class="stat" role="listitem">
+    <div class="label">Clauses Evaluated</div>
+    <div class="value">{{ metrics.total_clauses }}</div>
+  </div>
+  <div class="stat" role="listitem">
+    <div class="label">Compliant</div>
+    <div class="value ok">{{ metrics.compliant }}</div>
+    <div class="hint">{{ pct(metrics.compliant, metrics.total_clauses) }}% of clauses</div>
+  </div>
+  <div class="stat" role="listitem">
+    <div class="label">Non-Compliant</div>
+    <div class="value bad">{{ metrics.non_compliant }}</div>
+    <div class="hint">{{ pct(metrics.non_compliant, metrics.total_clauses) }}% of clauses</div>
+  </div>
+  <div class="stat" role="listitem">
+    <div class="label">Needs Review</div>
+    <div class="value warn">{{ metrics.needs_review }}</div>
+    <div class="hint">human review required</div>
+  </div>
+  {% if backend == 'postgres' %}
+  <div class="stat" role="listitem">
+    <div class="label">Review Queue</div>
+    <div class="value warn">{{ metrics.review_pending }}</div>
+    <div class="hint">actionable items</div>
+  </div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h3 class="card-title">Compliance Distribution</h3>
+  <div class="bar-track" aria-label="Compliance distribution" role="img">
+    {% set okw = pct(metrics.compliant, metrics.total_clauses) %}
+    {% set badw = pct(metrics.non_compliant, metrics.total_clauses) %}
+    <div class="bar-seg bar-ok" style="width: {{ okw }}%"></div>
+    <div class="bar-seg bar-bad" style="width: {{ badw }}%"></div>
+    <div class="bar-seg bar-warn" style="width: {{ pct(metrics.needs_review, metrics.total_clauses) }}%"></div>
+  </div>
+  <div class="legend">
+    <span><i class="lg lg-ok"></i>Compliant ({{ metrics.compliant }})</span>
+    <span><i class="lg lg-bad"></i>Non-compliant ({{ metrics.non_compliant }})</span>
+    <span><i class="lg lg-warn"></i>Needs review ({{ metrics.needs_review }})</span>
+  </div>
+</div>
+
+<h2>Recent analyses</h2>
+<div class="table-wrap">
+  <table class="data">
+    <thead>
+      <tr><th>Analysis</th><th>Generated</th><th>Clauses</th><th class="num">Compliant</th><th class="num">Non-compliant</th><th class="num">Needs review</th></tr>
+    </thead>
+    <tbody>
+      {% for a in recent %}
+      <tr>
+        <td><a class="mono" href="/dashboard/analyses/{{ a.analysis_id }}">{{ a.analysis_id }}</a></td>
+        <td class="muted nowrap">{{ a.generated_at }}</td>
+        <td class="num">{{ a.total_clauses }}</td>
+        <td class="num">{{ a.compliant }}</td>
+        <td class="num">{{ a.non_compliant }}</td>
+        <td class="num">{{ a.needs_review }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<p class="muted"><a href="/dashboard/analyses">View all analyses &rarr;</a></p>
+{% endif %}
+{% endblock %}

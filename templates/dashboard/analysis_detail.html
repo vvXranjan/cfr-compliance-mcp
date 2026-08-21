@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% from "_macros.html" import status_badge, verification_badge, memory_badge %}
+{% block title %}{{ record.analysis_id }} · CFR Compliance Dashboard{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Analysis</h1>
+  <div class="sub mono">{{ record.analysis_id }}</div>
+</div>
+
+<div class="card">
+  <dl class="kv">
+    <dt>Generated</dt><dd class="muted">{{ record.generated_at }}</dd>
+    <dt>Contract</dt><dd>{{ record.contract_id or '—' }}</dd>
+    <dt>Summary</dt>
+    <dd>
+      <span class="badge b-compliant">{{ record.compliant }} compliant</span>
+      <span class="badge b-non">{{ record.non_compliant }} non-compliant</span>
+      <span class="badge b-review">{{ record.needs_review }} needs review</span>
+      <span class="muted">of {{ record.total_clauses }} clauses</span>
+    </dd>
+  </dl>
+</div>
+
+<h2>Clauses</h2>
+{% for c in record.clauses %}
+<article class="card">
+  <h3 style="margin-top:0">
+    {{ c.clause_title }}
+    {{ status_badge(c.status) }} {{ verification_badge(c.verification_status) }}
+    {{ memory_badge(c.memory_participated) }}
+  </h3>
+  <p class="muted mono">clause {{ c.clause_id }} · confidence {{ c.confidence }}</p>
+  <p><strong>Reason:</strong> {{ c.reason or '—' }}</p>
+
+  <h4>Authoritative CFR evidence</h4>
+  {% if c.evidence %}
+    {% for ev in c.evidence %}
+    <div class="evidence">
+      <p style="margin:0"><strong>{{ ev.citation }}</strong>
+        {% if ev.version %}<span class="src">· version {{ ev.version }}</span>{% endif %}
+        {% if ev.date %}<span class="src">· as of {{ ev.date }}</span>{% endif %}
+      </p>
+      <blockquote>{{ ev.text_span }}</blockquote>
+      <p class="src">
+        source {{ ev.source or 'eCFR' }} · retrieved via {{ ev.retrieval_method or 'retrieval' }}
+        · title {{ ev.title }}{% if ev.part %}, part {{ ev.part }}{% endif %}{% if ev.section %}, § {{ ev.section }}{% endif %}
+        {% if ev.retrieved_at %}· {{ ev.retrieved_at }}{% endif %}
+      </p>
+    </div>
+    {% endfor %}
+  {% else %}
+  <p class="muted">No authoritative evidence recorded for this clause.</p>
+  {% endif %}
+
+  {% if c.memory_participated %}
+  <div class="memory-note" role="note">
+    <strong>Advisory historical memory.</strong> This clause's evaluation was
+    influenced by historical compliance memory. Memory is historical context
+    only and is <em>never</em> a source of regulatory truth. The CFR evidence
+    above is authoritative.
+  </div>
+  {% endif %}
+
+  {% if c.review_audit %}
+  <hr class="section-divider">
+  <h4>Automated review audit</h4>
+  <dl class="kv">
+    <dt>Final status</dt><dd>{{ c.review_audit.final_status }}</dd>
+    <dt>Proposed</dt><dd>{{ c.review_audit.proposed_status }} ({{ c.review_audit.proposed_confidence }})</dd>
+    <dt>Verifier recommendation</dt><dd>{{ c.review_audit.verifier_recommendation or '—' }}</dd>
+    <dt>Review reason</dt><dd>{{ c.review_audit.review_reason or '—' }}</dd>
+    <dt>Verifier notes</dt><dd>{{ c.review_audit.verifier_notes or '—' }}</dd>
+    <dt>Deterministic status</dt><dd>{{ c.review_audit.deterministic_status or '—' }}</dd>
+    <dt>Reviewed at</dt><dd class="muted">{{ c.review_audit.reviewed_at }}</dd>
+  </dl>
+  {% endif %}
+
+  {% if c.status == 'Needs Review' or c.verification_status == 'needs_review' %}
+  <p style="margin-top: var(--s4)"><a class="btn btn-subtle" href="/dashboard/reviews/{{ record.analysis_id }}/{{ c.clause_id }}">Open in review queue &rarr;</a></p>
+  {% endif %}
+</article>
+{% else %}
+<div class="empty"><h3>No clauses</h3><p>This analysis has no clauses.</p></div>
+{% endfor %}
+<p><a href="/dashboard/analyses">&larr; Back to analyses</a></p>
+{% endblock %}

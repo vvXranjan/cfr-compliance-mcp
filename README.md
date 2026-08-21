@@ -20,7 +20,9 @@ Given a contract clause, the system:
    (version-aware where supported).
 4. Enriches the result with evidence passages carrying provenance and version
    metadata.
-5. Evaluates with a compliance agent (Agno + a configurable LLM).
+5. Evaluates with a compliance agent calling a configurable
+   OpenAI-compatible LLM endpoint (defaults to Nemotron via ATM) over a
+   direct HTTP request with structured JSON output.
 6. Verifies the result against the evidence.
 7. Returns a structured Pydantic result: **VERIFIED** or **NEEDS_REVIEW**
    (with a full review audit trail for human follow-up).
@@ -34,16 +36,16 @@ Contract / Clause
 Security Gate
         │
         ▼
-Deterministic Validation
-        │
-        ▼
 CFR / eCFR Retrieval
         │
         ▼
 Version-Aware Evidence
         │
         ▼
-Compliance Agent
+Deterministic Validation
+        │
+        ▼
+Compliance Agent (LLM)
         │
         ▼
 Structured Pydantic Result
@@ -59,6 +61,10 @@ VERIFIED   NEEDS_REVIEW
           Human Review
 ```
 
+> Compliance Memory is an **advisory, contextual** input to the compliance
+> agent step above — it is never authoritative CFR evidence and cannot
+> reorder this hierarchy (see below).
+
 ## Components
 
 - **FastMCP** — MCP server exposing the official eCFR API as 8 structured tools
@@ -68,10 +74,11 @@ VERIFIED   NEEDS_REVIEW
 - **eCFR integration** — official `https://www.ecfr.gov` REST/XML API with
   client-side rate limiting, retries, and an in-process TTL cache
   (`CACHE_BACKEND=memory`).
-- **Agno / LLM** — compliance agent with structured output via Pydantic. LLM
-  defaults to Nemotron (`nvidia/nemotron-3-nano-omni`) via ATM, with an
-  OpenAI-compatible fallback (`OPENAI_API_KEY`). Ollama is a supported
-  compatible backend.
+- **LLM evaluation** — compliance agent that calls a configurable
+  OpenAI-compatible endpoint over a direct HTTP request with strict JSON
+  output. Defaults to Nemotron (`nvidia/nemotron-3-nano-omni`) via ATM
+  (`ATM_API_KEY`, `ATM_BASE_URL`, `ATM_MODEL`), with an OpenAI-compatible
+  fallback (`OPENAI_API_KEY`).
 - **Deterministic rules** — LLM-free filter producing
   Compliant / Non-Compliant / Needs Review verdicts with evidence passages.
 - **Evidence provenance** — each evidence passage records its source, retrieval
@@ -89,8 +96,22 @@ VERIFIED   NEEDS_REVIEW
 - **Report persistence** — `/evaluate-bulk` can persist an auditable report
   (opt-in via `CFR_REPORTS_DIR`) with atomic writes and
   path-traversal-safe filenames, written through a `PersistenceRepository`
-  boundary (`FileRepository` today; PostgreSQL deliberately deferred until
-  the review/dashboard layer needs queryable history).
+  boundary. The default `file` backend keeps the existing on-disk JSON
+  reports; an optional PostgreSQL backend adds queryable history and the
+  human review workflow (see below).
+- **Analysis history** — `GET /analyses` and `GET /analyses/{id}` expose
+  queryable, paginated analysis history (with status filtering). No full
+  contract text, prompts, or secrets are ever exposed or stored.
+- **Human review workflow** — `GET/POST /reviews/...` implement an explicit
+  reviewer lifecycle (`needs_review → under_review → approved/rejected/
+  escalated`) with optimistic concurrency and an immutable audit trail.
+  Reviewer decisions NEVER overwrite the original automated result,
+  evidence, or `ReviewAudit`. Requires the PostgreSQL backend.
+- **Human review dashboard** — a thin, server-rendered Jinja2 UI
+  (`/dashboard`) over the same backend: analysis history, analysis/clause
+  details with authoritative evidence, the NEEDS_REVIEW queue, review
+  decisions, and the audit trail. No React/Vite/Node, no separate frontend
+  service, no WebSockets.
 - **Compliance Memory** — an opt-in, deterministic, durable, *advisory*
   layer (append-only JSONL store) that persists eligible **VERIFIED**
   outcomes and reuses them only as clearly labeled historical context.
@@ -117,7 +138,8 @@ Required environment variables (see `.env.example` for the full list):
 | `OPENAI_API_KEY` | Fallback credential for any OpenAI-compatible endpoint |
 | `ECFR_BASE_URL` | eCFR API base URL (default `https://www.ecfr.gov`) |
 | `CFR_REPORTS_DIR` | Enable report persistence for `/evaluate-bulk` |
-| `CFR_PERSISTENCE_BACKEND` | Persistence backend: `file` (default). `postgres` is recognized but not implemented — fails clearly at startup |
+| `CFR_PERSISTENCE_BACKEND` | Persistence backend: `file` (default) or `postgres` (queryable history + review workflow). Selection is explicit; no silent fallback |
+| `CFR_DATABASE_URL` | PostgreSQL connection string (used when backend is `postgres`) |
 | `CFR_MEMORY_ENABLED` | Enable the advisory Compliance Memory layer (default off) |
 | `CFR_MEMORY_DIR` | Directory for the append-only memory store (default `<repo>/memory`) |
 | `CORS_ORIGINS` | Allowed CORS origins for the REST API |
@@ -143,7 +165,8 @@ uv run uvicorn api:app --host 0.0.0.0 --port 8000
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/health` | GET | Health / readiness check |
+| `/health` | GET | Liveness check |
+| `/health/ready` | GET | Readiness check (reflects backend usability) |
 | `/evaluate-clause` | POST | Evaluate a single clause through the full pipeline |
 | `/evaluate-bulk` | POST | Evaluate a batch of clauses (max 200), optionally persisting a report |
 
@@ -198,6 +221,75 @@ Structured events: `memory_index_attempt/success/skipped`,
 `memory_retrieval_success/empty/failure`, `memory_exact_match`,
 `memory_near_match`, `fallback_to_authoritative_only`. Full contract
 text, prompts, embeddings, secrets and API keys are never logged.
+
+## PostgreSQL persistence & human review (optional)
+
+The `file` backend (default) is fully self-contained. When queryable
+history and an explicit human review workflow are needed, enable the
+PostgreSQL backend:
+
+```bash
+# 1. Set the backend + DSN in .env
+CFR_PERSISTENCE_BACKEND=postgres
+CFR_DATABASE_URL=postgresql://user:pass@host/db
+
+# 2. Apply the versioned schema (idempotent, safe to re-run)
+uv run python scripts/migrate.py --dsn "$CFR_DATABASE_URL"
+
+# 3. Start the API; it fails fast at startup if the DB is unreachable
+uv run uvicorn api:app --host 0.0.0.0 --port 8000
+```
+
+### Reproducible local stack (Docker Compose)
+
+A `compose.yaml` provides the smallest production-style local stack: the
+application plus PostgreSQL 16 with a named data volume, health checks,
+and a one-shot migration service. No secrets are hard-coded (values come
+from the environment with safe local defaults).
+
+```bash
+docker compose up -d --build
+open http://localhost:8000/dashboard
+```
+
+The `migrate` service applies the schema once before the app starts; the
+`app` service waits for it to complete successfully. Data persists in the
+`pgdata` volume.
+
+Backend selection is explicit — there is never a silent fallback from
+`postgres` to `file`. The schema is created by versioned SQL migrations
+(`migrations/*.sql`) tracked in a `schema_migrations` table (psycopg 3,
+no ORM, no Alembic).
+
+Endpoints added (existing `/health`, `/evaluate-clause`, `/evaluate-bulk`
+are unchanged):
+
+- `GET /health` — liveness (process is up)
+- `GET /health/ready` — readiness; reflects backend usability (PostgreSQL
+  is pinged when configured; never returns DSNs/secrets)
+- `GET /analyses` — paginated analysis history, optional `status` filter
+- `GET /analyses/{analysis_id}` — full immutable report (clauses, evidence,
+  provenance, verification, review audit, memory participation)
+- `GET /reviews` — review queue (defaults to actionable `needs_review`)
+- `GET /reviews/{analysis_id}/{clause_id}` — full review view
+- `POST /reviews/{analysis_id}/{clause_id}/decide` — validated review
+  decision with optimistic concurrency
+
+A server-rendered human-review dashboard is served by the same app at
+`/dashboard` (Overview, Analyses, Analysis detail, Review Queue, Review
+detail with decision form and audit trail). It reads through the same
+configured backend; with the `file` backend the history pages work and
+review pages show a clear notice that the review workflow requires
+PostgreSQL.
+
+Human review is an **additional decision layer**: the reviewer lifecycle
+(`needs_review → under_review → approved/rejected/escalated`) is
+explicitly validated, uses optimistic concurrency (`expected_version`) so
+concurrent reviewers cannot overwrite each other, and appends to an
+immutable `review_decision_events` audit log. A reviewer decision never
+overwrites the original automated result, evidence, or `ReviewAudit`.
+`reviewer_identity` is an **unauthenticated placeholder** — there is no
+authentication system in this milestone.
 
 ## Running the benchmark
 
@@ -256,15 +348,23 @@ docker run --rm -p 8000:8000 -e ATM_API_KEY=... cfr-compliance-mcp
 - Non-live tests run offline: `uv run pytest --deselect tests/test_live_llm_integration.py`
 - Live LLM tests require `ATM_API_KEY` and network access to the ATM endpoint:
   `uv run pytest tests/test_live_llm_integration.py`
+- Optional PostgreSQL integration tests (skipped cleanly when no test DB is
+  configured): `CFR_TEST_DATABASE_URL=... uv run pytest tests/test_postgres_integration.py`
 - Lint: `uv run ruff check .`
 
 ## Evaluation & Validation
 
-- 181 offline tests pass (130 prior + 33 new Compliance Memory tests +
-  18 new persistence repository tests);
-  9 live LLM tests require `ATM_API_KEY` and network access
+- 265 offline tests pass (244 prior + overview/aggregation, readiness, and
+  compose-config sanity tests using deterministic fakes);
+  9 optional PostgreSQL integration tests are exercised against a real DB when
+  `CFR_TEST_DATABASE_URL` is set; 9 live LLM tests require `ATM_API_KEY`
 - `ruff check .` — clean
-- Docker build and runtime verified (`/health` and `/evaluate-clause`)
+- Docker build and runtime verified (`/health`, `/health/ready`, and the
+  dashboard at `/dashboard`)
+- Note: the offline suite emits a Starlette `StarletteDeprecationWarning`
+  about its `TestClient` preferring `httpx2`. This is an intentional
+  upstream future-deprecation; the project uses `httpx` (required by its MCP
+  and OpenTelemetry dependencies), so no dependency change is warranted.
 
 ## Known limitations
 

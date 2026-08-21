@@ -28,7 +28,9 @@ reports/
 # --- Non-runtime directories (dev/test/docs) ---------------------------
 tests/
 benchmark/
-scripts/
+# scripts/ contains dev-only helpers; only the migration runner is runtime.
+scripts/*
+!scripts/migrate.py
 HANDOFF/
 docs/
 .vscode/

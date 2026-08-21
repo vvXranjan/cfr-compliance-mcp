@@ -1,17 +1,18 @@
 """agent/persistence
 
-Persistence abstraction for compliance analysis reports.
+Persistence abstraction for compliance analysis reports and the human
+review workflow.
 
-The persistence boundary exists so the write path is backend-agnostic and
-a future `PostgresRepository` can be introduced when the
-dashboard/review/history layer creates a demonstrated need -- without
-touching the pipeline, the API, or the existing JSON report format.
+The boundary exists so the write/query path is backend-agnostic. Today:
 
-Current backend:
-  - "file" -> `FileRepository` (delegates to `agent.reporting`)
+  - "file" -> `FileRepository` (delegates to `agent.reporting`); provides
+    analysis history but NOT the review workflow (not relational).
+  - "postgres" -> `PostgresRepository` (psycopg 3, explicit SQL);
+    queryable analysis history plus the transactional review workflow.
 
-Unsupported/not-yet-implemented backends (e.g. "postgres") fail clearly
-at repository construction -- never a silent fallback to `file`.
+Backend selection is explicit and fails fast -- there is never a silent
+fallback. PostgreSQL is optional; "file" remains the default and the
+existing filesystem report persistence stays fully functional.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from .file_repository import FileRepository
 __all__ = [
     "PersistenceRepository",
     "FileRepository",
+    "PostgresRepository",
     "get_persistence_repository",
 ]
 
@@ -41,9 +43,9 @@ def get_persistence_repository(
         The configured `PersistenceRepository`.
 
     Raises:
-        ValueError: if the configured backend is unsupported or not yet
-            implemented (e.g. "postgres"). Backends never silently fall
-            back to `file`.
+        ValueError: if the configured backend is unsupported, or if
+            "postgres" is selected without a valid ``CFR_DATABASE_URL``.
+            Backends never silently fall back to `file`.
     """
     from cfr_compliance_mcp.config import get_settings
 
@@ -53,8 +55,17 @@ def get_persistence_repository(
     if backend == "file":
         return FileRepository()
 
+    if backend == "postgres":
+        if not backend_settings.cfr_database_url:
+            raise ValueError(
+                "CFR_PERSISTENCE_BACKEND=postgres requires CFR_DATABASE_URL to be set. "
+                "No silent fallback to the 'file' backend is performed."
+            )
+        from .postgres_repository import PostgresRepository
+
+        return PostgresRepository(backend_settings.cfr_database_url)
+
     raise ValueError(
-        f"Persistence backend {backend!r} is not implemented. "
-        "Supported backend: 'file'. PostgreSQL will follow only once the "
-        "review/dashboard/history layer creates a demonstrated need."
+        f"Persistence backend {backend!r} is not supported. "
+        "Supported backends: 'file', 'postgres'."
     )

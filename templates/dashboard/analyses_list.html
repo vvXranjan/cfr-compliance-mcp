@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% from "_macros.html" import pagination with context %}
+{% block title %}Analyses · CFR Compliance Dashboard{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Analysis History</h1>
+  <div class="sub">{{ total }} analyses across runs.</div>
+</div>
+
+<div class="filters" role="group" aria-label="Filter analyses by outcome">
+  <a class="chip {{ 'active' if not status else '' }}" href="/dashboard/analyses">All</a>
+  <a class="chip {{ 'active' if status == 'needs_review' else '' }}" href="/dashboard/analyses?status=needs_review">Needs review</a>
+  <a class="chip {{ 'active' if status == 'non_compliant' else '' }}" href="/dashboard/analyses?status=non_compliant">Non-compliant</a>
+  <a class="chip {{ 'active' if status == 'compliant' else '' }}" href="/dashboard/analyses?status=compliant">Compliant</a>
+</div>
+
+{% if items %}
+<div class="table-wrap">
+  <table class="data">
+    <thead>
+      <tr><th>Analysis</th><th>Generated</th><th>Clauses</th><th class="num">Compliant</th><th class="num">Non-compliant</th><th class="num">Needs review</th><th>Status</th></tr>
+    </thead>
+    <tbody>
+      {% for a in items %}
+      <tr>
+        <td><a class="mono" href="/dashboard/analyses/{{ a.analysis_id }}">{{ a.analysis_id }}</a></td>
+        <td class="muted nowrap">{{ a.generated_at }}</td>
+        <td class="num">{{ a.total_clauses }}</td>
+        <td class="num">{{ a.compliant }}</td>
+        <td class="num">{{ a.non_compliant }}</td>
+        <td class="num">{{ a.needs_review }}</td>
+        <td>
+          {% if a.needs_review > 0 %}<span class="badge b-review">Needs review</span>
+          {% elif a.non_compliant > 0 %}<span class="badge b-non">Non-compliant</span>
+          {% else %}<span class="badge b-compliant">Compliant</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{{ pagination(status, limit, offset) }}
+{% else %}
+<div class="empty">
+  <div class="icon" aria-hidden="true">&#128203;</div>
+  <h3>No analyses found</h3>
+  <p>
+    {% if status %}No analyses match this filter.
+    {% else %}No compliance analyses have been persisted yet. Submit a bulk
+    evaluation through the API (<code class="mono">POST /evaluate-bulk</code>) and
+    persisted results will appear here.{% endif %}
+  </p>
+</div>
+{% endif %}
+{% endblock %}

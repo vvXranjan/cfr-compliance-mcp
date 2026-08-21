@@ -22,13 +22,17 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from typing import Any
+from pathlib import Path
+from typing import Annotated, Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from opentelemetry import trace as trace_api
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.sdk.resources import Resource
@@ -42,10 +46,25 @@ try:
 except ImportError:  # pragma: no cover - depends on installed exporter version
     _JAEGER_AVAILABLE = False
 
+import dashboard as dashboard_module
 from agent.deterministic_rules import evaluate_deterministic
 from agent.models import Clause, ComplianceResult, EvidencePassage, ReviewAudit
 from agent.persistence import get_persistence_repository
-from agent.reporting import build_report
+from agent.persistence.base import (
+    AnalysisNotFoundError,
+    ConcurrencyError,
+    ReviewNotFoundError,
+    ReviewNotSupportedError,
+    ReviewStateError,
+)
+from agent.persistence.models import (
+    AnalysisSummary,
+    ReviewDecisionRequest,
+    ReviewDetail,
+    ReviewItem,
+    ReviewState,
+)
+from agent.reporting import ReportRecord, build_report
 from agent.security import (
     check_clause_security,
     sanitize_cfr_text,
@@ -60,17 +79,39 @@ configure_logging()
 
 logger = logging.getLogger(__name__)
 
+
+@asynccontextmanager
+async def lifespan(_app: Any) -> AsyncIterator[None]:
+    """Startup/shutdown hook.
+
+    When the PostgreSQL backend is configured, fail fast at startup if
+    the database is unreachable -- never silently fall back to files.
+    """
+    if getattr(PERSISTENCE_REPO, "backend", "file") == "postgres":
+        try:
+            PERSISTENCE_REPO.ping()
+        except Exception:
+            logger.exception(
+                "PostgreSQL persistence backend is configured but unreachable; "
+                "refusing to start rather than silently falling back to files"
+            )
+            raise
+    yield
+
+
 app = FastAPI(
     title="cfr-compliance-mcp API",
     description=(
         "Production-oriented AI compliance engineering platform - "
         "evidence-grounded, auditable CFR compliance checking with an "
-        "authoritative retrieval pipeline and an optional, advisory "
-        "deterministic Compliance Memory for historical context"
+        "authoritative retrieval pipeline, an optional advisory "
+        "deterministic Compliance Memory, queryable analysis history, "
+        "and an explicit human review workflow"
     ),
     version="0.2.0",
     docs_url="/api/docs",
     redoc_url="/api/redoc",
+    lifespan=lifespan,
 )
 
 # CORS middleware - restrict origins in production via CORS_ORIGINS.
@@ -98,6 +139,19 @@ REPORTS_DIR = os.getenv("CFR_REPORTS_DIR")
 # "file"). Constructed once at startup so an unsupported/not-implemented
 # backend fails clearly instead of silently falling back.
 PERSISTENCE_REPO = get_persistence_repository()
+
+# Mount the thin, server-rendered human-review dashboard over the same
+# repository/backend. It is read-mostly and never changes the authority
+# model.
+dashboard_module.set_repository(PERSISTENCE_REPO, REPORTS_DIR)
+app.include_router(dashboard_module.router)
+
+# Dashboard static assets (CSS).
+app.mount(
+    "/static",
+    StaticFiles(directory=str(Path(__file__).resolve().parent / "static")),
+    name="static",
+)
 
 # ---------------------------------------------------------------------------
 # OpenTelemetry tracing setup
@@ -163,6 +217,63 @@ async def unhandled_exception_handler(request: Any, exc: Exception) -> JSONRespo
         content=APIError(
             error="internal_error",
             message="An unexpected internal error occurred",
+        ).model_dump(),
+    )
+
+
+@app.exception_handler(AnalysisNotFoundError)
+async def analysis_not_found_handler(request: Any, exc: AnalysisNotFoundError) -> JSONResponse:
+    return JSONResponse(
+        status_code=404,
+        content=APIError(
+            error="analysis_not_found",
+            message="Analysis or clause not found",
+        ).model_dump(),
+    )
+
+
+@app.exception_handler(ReviewNotFoundError)
+async def review_not_found_handler(request: Any, exc: ReviewNotFoundError) -> JSONResponse:
+    return JSONResponse(
+        status_code=404,
+        content=APIError(
+            error="review_not_found",
+            message="No review record for this clause",
+        ).model_dump(),
+    )
+
+
+@app.exception_handler(ReviewStateError)
+async def review_state_error_handler(request: Any, exc: ReviewStateError) -> JSONResponse:
+    return JSONResponse(
+        status_code=409,
+        content=APIError(
+            error="invalid_transition",
+            message="Invalid review transition for the current state",
+        ).model_dump(),
+    )
+
+
+@app.exception_handler(ConcurrencyError)
+async def concurrency_error_handler(request: Any, exc: ConcurrencyError) -> JSONResponse:
+    return JSONResponse(
+        status_code=409,
+        content=APIError(
+            error="concurrency_conflict",
+            message="Review version conflict; refresh the current state and retry",
+        ).model_dump(),
+    )
+
+
+@app.exception_handler(ReviewNotSupportedError)
+async def review_not_supported_handler(
+    request: Any, exc: ReviewNotSupportedError
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=501,
+        content=APIError(
+            error="review_not_supported",
+            message="The review workflow requires the PostgreSQL persistence backend",
         ).model_dump(),
     )
 
@@ -323,6 +434,24 @@ class BulkComplianceResponse(BaseModel):
     non_compliant: int
     needs_review: int
     results: list[ComplianceResponse]
+
+
+class AnalysisListResponse(BaseModel):
+    """Paginated analysis-history listing."""
+
+    items: list[AnalysisSummary]
+    total: int
+    limit: int
+    offset: int
+
+
+class ReviewListResponse(BaseModel):
+    """Paginated review-queue listing."""
+
+    items: list[ReviewItem]
+    total: int
+    limit: int
+    offset: int
 
 
 # ---------------------------------------------------------------------------
@@ -699,12 +828,35 @@ def _response_from_result(
 
 @app.get("/health", include_in_schema=False)
 async def health_check() -> dict[str, str]:
-    """Health/readiness check."""
+    """Liveness health check (process is up)."""
     return {
         "status": "healthy",
         "service": "cfr-compliance-mcp",
         "llm_available": str(LLM_AVAILABLE),
     }
+
+
+@app.get("/health/ready", include_in_schema=False)
+async def readiness_check() -> JSONResponse:
+    """Readiness check reflecting whether the configured backend is usable.
+
+    The file backend is always ready. When PostgreSQL is configured, the
+    check verifies the database is reachable (no DSN or secret is ever
+    included in the response).
+    """
+    backend = getattr(PERSISTENCE_REPO, "backend", "file")
+    ready = True
+    ping = getattr(PERSISTENCE_REPO, "ping", None)
+    if backend == "postgres" and callable(ping):
+        try:
+            ping()
+        except Exception:
+            logger.warning("Readiness check failed: PostgreSQL backend unreachable")
+            ready = False
+    return JSONResponse(
+        status_code=200 if ready else 503,
+        content={"status": "ready" if ready else "not_ready", "backend": backend},
+    )
 
 
 @app.post("/evaluate-clause", response_model=ComplianceResponse)
@@ -844,13 +996,24 @@ async def evaluate_bulk_clauses(
         results=results,
     )
 
-    if REPORTS_DIR:
+    if _persistence_enabled():
         try:
             _persist_bulk_report(clauses, domain_results)
         except Exception:
             logger.exception("Failed to persist bulk compliance report")
 
     return response
+
+
+def _persistence_enabled() -> bool:
+    """True when the configured backend should persist bulk analyses.
+
+    The filesystem backend persists only when ``CFR_REPORTS_DIR`` is set
+    (opt-in, unchanged). The PostgreSQL backend always persists so the
+    history/review features are usable. Persistence failures are never
+    allowed to fail a successful evaluation.
+    """
+    return PERSISTENCE_REPO.backend == "postgres" or bool(REPORTS_DIR)
 
 
 def _persist_bulk_report(
@@ -879,3 +1042,105 @@ def _persist_bulk_report(
     )
     path = PERSISTENCE_REPO.save_report(record, reports_dir=REPORTS_DIR)
     logger.info("Persisted bulk compliance report to %s", path)
+
+
+# ---------------------------------------------------------------------------
+# Analysis history
+# ---------------------------------------------------------------------------
+
+
+@app.get("/analyses", response_model=AnalysisListResponse)
+async def list_analyses(
+    status: Annotated[
+        str | None,
+        Query(
+            pattern="^(compliant|non_compliant|needs_review)$",
+            description="Filter analyses that produced the given outcome.",
+        ),
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> AnalysisListResponse:
+    """List analysis history across runs (paginated)."""
+    items = PERSISTENCE_REPO.list_analyses(
+        status=status, limit=limit, offset=offset, reports_dir=REPORTS_DIR
+    )
+    total = PERSISTENCE_REPO.count_analyses(status=status, reports_dir=REPORTS_DIR)
+    return AnalysisListResponse(items=items, total=total, limit=limit, offset=offset)
+
+
+@app.get("/analyses/{analysis_id}", response_model=ReportRecord)
+async def get_analysis(analysis_id: str) -> ReportRecord:
+    """Return the full, immutable report for one analysis.
+
+    Includes clause results, authoritative evidence + provenance,
+    verification status, the existing review audit, and the
+    ``memory_participated`` indicator. Never includes secrets, prompts,
+    or full contract text.
+    """
+    try:
+        return PERSISTENCE_REPO.get_analysis(analysis_id, reports_dir=REPORTS_DIR)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Analysis not found") from None
+
+
+# ---------------------------------------------------------------------------
+# Human review workflow
+# ---------------------------------------------------------------------------
+
+
+@app.get("/reviews", response_model=ReviewListResponse)
+async def list_reviews(
+    state: Annotated[
+        ReviewState | None,
+        Query(
+            description="Filter by review state; defaults to the actionable needs_review queue."
+        ),
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> ReviewListResponse:
+    """List the human review queue (paginated). Defaults to actionable items."""
+    state_val = (state.value if state else None) or "needs_review"
+    items = PERSISTENCE_REPO.list_review_queue(state=state_val, limit=limit, offset=offset)
+    total = PERSISTENCE_REPO.count_review_queue(state=state_val)
+    return ReviewListResponse(items=items, total=total, limit=limit, offset=offset)
+
+
+@app.get("/reviews/{analysis_id}/{clause_id}", response_model=ReviewDetail)
+async def get_review(analysis_id: str, clause_id: str) -> ReviewDetail:
+    """Return the full review view for a clause.
+
+    Preserves the original automated result, authoritative evidence +
+    provenance, verification state, the existing ReviewAudit, the current
+    review state, transition history, and the memory-participation
+    indicator.
+    """
+    return PERSISTENCE_REPO.get_review(analysis_id, clause_id)
+
+
+@app.post("/reviews/{analysis_id}/{clause_id}/decide", response_model=ReviewDetail)
+async def decide_review(
+    analysis_id: str,
+    clause_id: str,
+    decision: ReviewDecisionRequest,
+) -> ReviewDetail:
+    """Apply a validated human review decision.
+
+    A reviewer decision NEVER overwrites the original automated result:
+    it only transitions the review record (with optimistic concurrency
+    via ``expected_version``) and appends to the immutable event log.
+    ``reviewer_identity`` is an UNAUTHENTICATED placeholder -- there is
+    no authentication system in this milestone.
+
+    Responses: 404 missing resource, 409 invalid transition or version
+    conflict, 422 malformed request.
+    """
+    return PERSISTENCE_REPO.transition_review(
+        analysis_id,
+        clause_id,
+        target_state=decision.target_state.value,
+        reason=decision.reason,
+        reviewer_identity=decision.reviewer_identity,
+        expected_version=decision.expected_version,
+    )

@@ -60,6 +60,13 @@ class ClauseReport(BaseModel):
     verification_status: str = "not_verified"
     review_reason: str = ""
     review_audit: ReviewAudit | None = None
+    memory_participated: bool = Field(
+        default=False,
+        description=(
+            "True when historical Compliance Memory influenced this clause's "
+            "evaluation. Advisory context only; never regulatory truth."
+        ),
+    )
 
 
 class ReportRecord(BaseModel):
@@ -109,6 +116,7 @@ def _build_clause_report(result: ComplianceResult) -> ClauseReport:
         verification_status=result.verification_status,
         review_reason=result.review_reason,
         review_audit=result.review_audit,
+        memory_participated=result.memory_participated,
     )
 
 

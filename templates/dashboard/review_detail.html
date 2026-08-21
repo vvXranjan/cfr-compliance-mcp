@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+{% from "_macros.html" import status_badge, verification_badge, memory_badge, review_state_badge %}
+{% block title %}Review · CFR Compliance Dashboard{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Human Review</h1>
+  <div class="sub mono">{{ detail.analysis_id if detail else '' }} · {{ detail.clause_id if detail else '' }}</div>
+</div>
+
+{% if unsupported %}
+<div class="alert alert-warn" role="alert">
+  The human review workflow requires the PostgreSQL persistence backend. Set
+  <code class="mono">CFR_PERSISTENCE_BACKEND=postgres</code> and apply the schema.
+</div>
+<div class="empty"><h3>Review not available</h3><p>The current backend does not support review.</p></div>
+{% elif detail %}
+
+<section class="card">
+  <h4>Automated result</h4>
+  <h2 style="margin:0 0 var(--s2)">
+    {{ detail.clause_title }}
+    {{ status_badge(detail.original_status) }} {{ verification_badge(detail.verification_status) }}
+  </h2>
+  <dl class="kv">
+    <dt>Reason</dt><dd>{{ detail.reason or '—' }}</dd>
+    <dt>Confidence</dt><dd>{{ detail.confidence }}</dd>
+    <dt>Current review state</dt><dd>{{ review_state_badge(detail.review_state) }} <span class="muted">(version {{ detail.version }})</span></dd>
+    <dt>Reviewer</dt><dd>{{ detail.reviewer_identity or '—' }}</dd>
+    <dt>Decided</dt><dd class="muted">{{ detail.decided_at or '—' }}</dd>
+  </dl>
+</section>
+
+<section class="card">
+  <h4>Authoritative CFR evidence</h4>
+  {% if detail.evidence %}
+    {% for ev in detail.evidence %}
+    <div class="evidence">
+      <p style="margin:0"><strong>{{ ev.citation }}</strong>
+        {% if ev.version %}<span class="src">· version {{ ev.version }}</span>{% endif %}
+        {% if ev.date %}<span class="src">· as of {{ ev.date }}</span>{% endif %}
+      </p>
+      <blockquote>{{ ev.text_span }}</blockquote>
+      <p class="src">source {{ ev.source or 'eCFR' }} · {{ ev.retrieval_method or 'retrieval' }} · title {{ ev.title }}{% if ev.part %}, part {{ ev.part }}{% endif %}{% if ev.section %}, § {{ ev.section }}{% endif %}</p>
+    </div>
+    {% endfor %}
+  {% else %}
+  <p class="muted">No authoritative evidence recorded.</p>
+  {% endif %}
+</section>
+
+{% if detail.memory_participated %}
+<section class="card">
+  <h4>Historical memory context <span class="badge b-mem">advisory</span></h4>
+  <div class="memory-note" role="note">
+    Compliance Memory participated in this automated evaluation. Memory is
+    historical, advisory context only and is <em>never</em> a source of
+    regulatory truth. The CFR evidence above is authoritative.
+  </div>
+</section>
+{% endif %}
+
+{% if detail.review_audit %}
+<section class="card">
+  <h4>Verification / audit</h4>
+  <dl class="kv">
+    <dt>Proposed status</dt><dd>{{ detail.review_audit.proposed_status }} ({{ detail.review_audit.proposed_confidence }})</dd>
+    <dt>Verifier recommendation</dt><dd>{{ detail.review_audit.verifier_recommendation or '—' }}</dd>
+    <dt>Review reason</dt><dd>{{ detail.review_audit.review_reason or '—' }}</dd>
+    <dt>Verifier notes</dt><dd>{{ detail.review_audit.verifier_notes or '—' }}</dd>
+    <dt>Deterministic status</dt><dd>{{ detail.review_audit.deterministic_status or '—' }}</dd>
+    <dt>Reviewed at</dt><dd class="muted">{{ detail.review_audit.reviewed_at }}</dd>
+  </dl>
+</section>
+{% endif %}
+
+<section class="card">
+  <h4>Immutable decision history</h4>
+  {% if detail.events %}
+  <div class="table-wrap">
+    <table class="data">
+      <thead><tr><th>State</th><th>Reason</th><th>Reviewer</th><th>Timestamp</th></tr></thead>
+      <tbody>
+        {% for ev in detail.events %}
+        <tr>
+          <td>{{ review_state_badge(ev.state) }}</td>
+          <td>{{ ev.reason or '—' }}</td>
+          <td>{{ ev.reviewer_identity or '—' }}</td>
+          <td class="muted nowrap">{{ ev.created_at }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="muted">No review events recorded yet.</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h4>Human review decision</h4>
+  {% if allowed_targets %}
+  <form method="post" action="/dashboard/reviews/{{ detail.analysis_id }}/{{ detail.clause_id }}/decide"
+        onsubmit="return confirm('Record this review decision?')">
+    <input type="hidden" name="expected_version" value="{{ detail.version }}">
+    <div class="field">
+      <label for="target_state">Decision (current state: {{ detail.review_state }})</label>
+      <select name="target_state" id="target_state">
+        {% for t in allowed_targets %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label for="reviewer_identity">Reviewer</label>
+      <input type="text" name="reviewer_identity" id="reviewer_identity" maxlength="200" placeholder="e.g. reviewer-1">
+      <div class="form-help">Unauthenticated label only — there is no authentication system in this milestone.</div>
+    </div>
+    <div class="field">
+      <label for="reason">Reason</label>
+      <textarea name="reason" id="reason" rows="3" maxlength="2000"></textarea>
+    </div>
+    <button type="submit" class="btn">Record decision</button>
+  </form>
+  {% elif detail.review_state %}
+  <p class="muted">This record is in a terminal state; no further transitions are available.</p>
+  {% else %}
+  <p class="muted">This clause is not part of the review workflow.</p>
+  {% endif %}
+  <p class="form-help" style="margin-top: var(--s3)">
+    A review decision is an additional human layer and never overwrites the
+    original automated result, evidence, or audit trail. Optimistic concurrency
+    prevents concurrent reviewers from overwriting each other.
+  </p>
+</section>
+
+<p><a href="/dashboard/reviews">&larr; Back to review queue</a></p>
+{% endif %}
+{% endblock %}
