@@ -4,15 +4,6 @@
 
 **Prepared by: Vaibhav Vikas Ranjan**
 
-> Audience: a senior full-stack/frontend developer who needs to build a ChatGPT/Claude-style
-> assistant on top of this backend. It does not assume prior knowledge of the AI/backend internals.
->
-> Method: This document was produced by extracting the actual ZIP, reading the real source files,
-> and tracing every code path. The **implementation is the source of truth**. Where the README or
-> in-code docstrings conflict with what the code actually does, the discrepancy is called out
-> explicitly (see the two `⚠️ CRITICAL FINDING` blocks). Every important claim carries a
-> `File: …` / `Function: …` reference so you can verify it yourself.
-
 ---
 
 ## Table of Contents
