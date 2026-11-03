@@ -1,0 +1,252 @@
+{% extends "base.html" %}
+{% block title %}Analyze a clause · CFR Compliance Dashboard{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Analyze a clause</h1>
+  <div class="sub">Submit a single clause for compliance evaluation against CFR regulations.</div>
+</div>
+
+<div class="card">
+  <form id="analyze-form">
+    <div class="field">
+      <label for="clause_title">Clause title</label>
+      <input type="text" id="clause_title" name="clause_title" maxlength="500" required>
+    </div>
+    <div class="field">
+      <label for="clause_text">Clause text</label>
+      <textarea id="clause_text" name="clause_text" rows="5" required></textarea>
+    </div>
+
+    <details class="regulation-context">
+      <summary>Regulation context (optional)</summary>
+      <p class="form-help">
+        Provide the regulation text that applies to this clause. This endpoint
+        does <strong>not</strong> look up regulations from eCFR &mdash; a citation
+        alone is not enough. Without <code class="mono">cfr_text</code>, the result
+        resolves to &ldquo;Needs Review&rdquo;.
+      </p>
+      <div class="field">
+        <label for="cfr_title">CFR title</label>
+        <input type="number" id="cfr_title" name="cfr_title" min="1" max="50" placeholder="e.g. 40">
+        <div class="form-help">Optional title number, 1&ndash;50.</div>
+      </div>
+      <div class="field">
+        <label for="cfr_citation">CFR citation</label>
+        <input type="text" id="cfr_citation" name="cfr_citation" maxlength="200" placeholder="e.g. 40 CFR 262.18(c)">
+      </div>
+      <div class="field">
+        <label for="cfr_text">Regulation text</label>
+        <textarea id="cfr_text" name="cfr_text" rows="4" placeholder="Paste the relevant regulation text…"></textarea>
+      </div>
+    </details>
+
+    <button type="submit" class="btn" id="submit-btn">Analyze clause</button>
+  </form>
+
+  <div class="examples" role="group" aria-label="Example clauses">
+    <span class="examples-label">Try an example:</span>
+    {% for ex in examples %}
+    <button type="button" class="chip example-btn" data-example="{{ loop.index0 }}">{{ ex.label }}</button>
+    {% endfor %}
+  </div>
+</div>
+
+<div id="loading" class="loading" hidden aria-live="polite">
+  <span class="spinner" aria-hidden="true"></span> Analyzing clause…
+</div>
+
+<div id="error" class="alert alert-error" role="alert" hidden></div>
+
+<div id="result" hidden></div>
+
+<script type="application/json" id="examples-data">{{ examples_json | safe }}</script>
+
+<script>
+(function () {
+  var form = document.getElementById("analyze-form");
+  var loadingEl = document.getElementById("loading");
+  var errorEl = document.getElementById("error");
+  var resultEl = document.getElementById("result");
+  var submitBtn = document.getElementById("submit-btn");
+  var examples = JSON.parse(document.getElementById("examples-data").textContent);
+
+  function show(el) { el.hidden = false; }
+  function hide(el) { el.hidden = true; }
+  function val(id) { return document.getElementById(id).value.trim(); }
+
+  function fillExample(index) {
+    var ex = examples[index];
+    document.getElementById("clause_title").value = ex.clause_title;
+    document.getElementById("clause_text").value = ex.clause_text;
+    document.getElementById("cfr_title").value = ex.cfr_title;
+    document.getElementById("cfr_citation").value = ex.cfr_citation;
+    document.getElementById("cfr_text").value = ex.cfr_text;
+  }
+
+  var buttons = form.parentNode.querySelectorAll(".example-btn");
+  Array.prototype.forEach.call(buttons, function (btn) {
+    btn.addEventListener("click", function () {
+      fillExample(parseInt(btn.getAttribute("data-example"), 10));
+    });
+  });
+
+  function statusClass(status) {
+    if (status === "Compliant") return "b-compliant";
+    if (status === "Non-Compliant") return "b-non";
+    if (status === "Needs Review") return "b-review";
+    return "b-soft";
+  }
+
+  function badge(text, className, title) {
+    var span = document.createElement("span");
+    span.className = "badge " + className;
+    span.textContent = text;
+    if (title) span.title = title;
+    return span;
+  }
+
+  function statusBadge(status) {
+    return badge(status, statusClass(status));
+  }
+
+  function verificationBadge(vs) {
+    var text = vs || "not_verified";
+    if (vs === "verified") return badge(text, "b-verified");
+    if (vs === "needs_review") return badge(text, "b-review");
+    return badge(text, "b-soft");
+  }
+
+  function text(parent, str) {
+    parent.appendChild(document.createTextNode(str));
+  }
+
+  function renderResult(data) {
+    var card = document.createElement("article");
+    card.className = "card";
+
+    var heading = document.createElement("h2");
+    heading.style.marginTop = "0";
+    text(heading, data.clause_title + " ");
+    heading.appendChild(statusBadge(data.status));
+    heading.appendChild(document.createTextNode(" "));
+    heading.appendChild(verificationBadge(data.verification_status));
+    if (data.memory_participated) {
+      heading.appendChild(document.createTextNode(" "));
+      heading.appendChild(badge("memory", "b-mem", "Advisory historical context; not regulatory truth"));
+    }
+    card.appendChild(heading);
+
+    var meta = document.createElement("p");
+    meta.className = "muted mono";
+    text(meta, "clause " + data.clause_id + " · confidence " + data.confidence);
+    card.appendChild(meta);
+
+    var reason = document.createElement("p");
+    var strong = document.createElement("strong");
+    text(strong, "Reason: ");
+    reason.appendChild(strong);
+    text(reason, data.reason || "—");
+    card.appendChild(reason);
+
+    var evidenceHeading = document.createElement("h4");
+    text(evidenceHeading, "Authoritative CFR evidence");
+    card.appendChild(evidenceHeading);
+
+    if (data.evidence && data.evidence.length) {
+      data.evidence.forEach(function (ev) {
+        var e = document.createElement("div");
+        e.className = "evidence";
+        var cite = document.createElement("p");
+        cite.style.margin = "0";
+        var cstrong = document.createElement("strong");
+        text(cstrong, ev.citation);
+        cite.appendChild(cstrong);
+        if (ev.date) {
+          var d = document.createElement("span");
+          d.className = "src";
+          text(d, " · as of " + ev.date);
+          cite.appendChild(d);
+        }
+        e.appendChild(cite);
+        if (ev.text_span) {
+          var bq = document.createElement("blockquote");
+          text(bq, ev.text_span);
+          e.appendChild(bq);
+        }
+        card.appendChild(e);
+      });
+    } else {
+      var none = document.createElement("p");
+      none.className = "muted";
+      text(none, "No authoritative evidence recorded for this clause.");
+      card.appendChild(none);
+    }
+
+    if (data.status === "Needs Review") {
+      var note = document.createElement("p");
+      note.className = "alert alert-warn";
+      note.setAttribute("role", "status");
+      text(note,
+        "Needs human review. Single-clause results are not saved to the review " +
+        "queue; run a bulk analysis to create a reviewable record.");
+      card.appendChild(note);
+    }
+
+    return card;
+  }
+
+  function showError(status, body) {
+    var msg = "Unable to analyze the clause.";
+    if (body && typeof body === "object") {
+      if (body.message) msg = String(body.message);
+      else if (body.detail) msg = String(body.detail);
+    } else if (body) {
+      msg = String(body);
+    }
+    if (status) msg += " (HTTP " + status + ")";
+    errorEl.textContent = msg;
+    show(errorEl);
+  }
+
+  form.addEventListener("submit", function (event) {
+    event.preventDefault();
+    hide(errorEl);
+    hide(resultEl);
+    show(loadingEl);
+    submitBtn.disabled = true;
+
+    var payload = {
+      clause_title: val("clause_title"),
+      clause_text: val("clause_text")
+    };
+    if (val("cfr_title") !== "") payload.cfr_title = parseInt(val("cfr_title"), 10);
+    if (val("cfr_citation") !== "") payload.cfr_citation = val("cfr_citation");
+    if (val("cfr_text") !== "") payload.cfr_text = val("cfr_text");
+
+    fetch("/evaluate-clause", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }).then(function (resp) {
+      return resp.json().then(function (body) {
+        return { ok: resp.ok, status: resp.status, body: body };
+      });
+    }).then(function (res) {
+      hide(loadingEl);
+      submitBtn.disabled = false;
+      if (res.ok && res.body && typeof res.body.status === "string") {
+        resultEl.replaceChildren();
+        resultEl.appendChild(renderResult(res.body));
+        show(resultEl);
+      } else {
+        showError(res.status, res.body);
+      }
+    }).catch(function () {
+      hide(loadingEl);
+      submitBtn.disabled = false;
+      showError(0, null);
+    });
+  });
+})();
+</script>
+{% endblock %}

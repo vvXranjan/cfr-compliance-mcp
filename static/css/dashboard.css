@@ -211,6 +211,54 @@ dl.kv dd { margin: 0; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: var(--fs-sm); }
 .nowrap { white-space: nowrap; }
 
+/* ========================== Analyze a clause ============================= */
+.regulation-context {
+  margin: var(--s3) 0 var(--s4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  padding: var(--s3) var(--s4);
+}
+.regulation-context summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: var(--fs-sm);
+  color: var(--ink-2);
+}
+.regulation-context summary:hover { color: var(--accent-ink); }
+.regulation-context .field { margin-top: var(--s3); }
+
+.examples {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+  margin-top: var(--s4);
+  padding-top: var(--s4);
+  border-top: 1px solid var(--border);
+}
+.examples-label { font-size: var(--fs-sm); font-weight: 600; color: var(--muted); }
+.examples .chip { cursor: pointer; }
+
+.loading {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s4) var(--s5);
+  color: var(--ink-2);
+  font-size: var(--fs-sm);
+}
+.loading[hidden] { display: none; }
+.spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
 /* ============================ Responsive ================================ */
 @media (max-width: 720px) {
   .nav { padding: 0 var(--s4); gap: var(--s2); flex-wrap: wrap; height: auto; padding-top: var(--s2); padding-bottom: var(--s2); }

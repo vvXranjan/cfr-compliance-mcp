@@ -70,6 +70,17 @@ class TestHealth:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture()
+def llm_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force the LLM fallback path to be reachable regardless of environment.
+
+    ``api.LLM_AVAILABLE`` is computed once at import time from the
+    environment, so patch the module attribute directly. ``setenv`` alone
+    would have no effect because ``api`` is already imported.
+    """
+    monkeypatch.setattr("api.LLM_AVAILABLE", True)
+
+
 class TestEvaluateClause:
     def test_valid_deterministic_request(self) -> None:
         r = client.post("/evaluate-clause", json=NON_COMPLIANT_CLAUSE)
@@ -153,7 +164,7 @@ class TestEvaluateClause:
         assert "simulated LLM outage" not in data["reason"]
         assert data["review_audit"] is not None
 
-    def test_verifier_conflict_routes_to_needs_review(self, monkeypatch) -> None:
+    def test_verifier_conflict_routes_to_needs_review(self, monkeypatch, llm_enabled) -> None:
         def _conflicting_verifier(result, clause, cfr_text, title, version_payload=None):
             from agent.verification_agent import VerificationReport
 
@@ -181,7 +192,7 @@ class TestEvaluateClause:
         assert audit["evidence_citations"] == ["40 CFR 261.10"]
         assert audit["reviewed_at"]
 
-    def test_verifier_agreement_verified(self, monkeypatch) -> None:
+    def test_verifier_agreement_verified(self, monkeypatch, llm_enabled) -> None:
         def _accepting_verifier(result, clause, cfr_text, title, version_payload=None):
             from agent.verification_agent import VerificationReport
 
@@ -314,7 +325,7 @@ class TestEvaluateBulk:
         assert r.status_code == 422
         assert r.json()["error"] == "validation_error"
 
-    def test_downstream_failure_becomes_needs_review(self, monkeypatch) -> None:
+    def test_downstream_failure_becomes_needs_review(self, monkeypatch, llm_enabled) -> None:
         def _boom(*args, **kwargs):
             raise RuntimeError("bulk LLM outage")
 
