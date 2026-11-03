@@ -1,0 +1,4 @@
+# FORMAT EXAMPLES ONLY. The cfr_text below is invented to test the harness and is NOT real CFR text.
+# Replace with 30-50 real cases: copy exact text from eCFR, label by hand, note your reasoning.
+{"id":"ex001","clause_title":"Waste storage","clause_text":"Contractor shall store hazardous waste in labeled containers and inspect them weekly.","cfr_title":40,"cfr_part":"262","cfr_section":"1","cfr_text":"Generators must store hazardous waste in labeled containers and must inspect containers weekly.","expected":"Compliant","notes":"format example"}
+{"id":"ex002","clause_title":"Payment terms","clause_text":"Invoices are payable within sixty days of receipt.","cfr_title":40,"cfr_part":"262","cfr_section":"1","cfr_text":"Generators must store hazardous waste in labeled containers and must inspect containers weekly.","expected":"Non-Compliant","notes":"format example: clause ignores the mandate"}
