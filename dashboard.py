@@ -21,6 +21,7 @@ requires the PostgreSQL backend.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Annotated, Any
@@ -134,6 +135,76 @@ async def dashboard_index(request: Request) -> HTMLResponse:
 # ---------------------------------------------------------------------------
 # Analysis history
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Analyze a clause
+# ---------------------------------------------------------------------------
+
+# Example clauses with real eCFR regulation text. ``label`` is used only as
+# the example button text; it is never presented as a prediction in the UI.
+_ANALYZE_EXAMPLES: list[dict[str, Any]] = [
+    {
+        "label": "Waste hand-off",
+        "clause_title": "Waste hand-off",
+        "clause_text": (
+            "Contractor shall deliver hazardous waste only to transporters and "
+            "to treatment, storage, or disposal facilities that hold an EPA "
+            "identification number."
+        ),
+        "cfr_title": 40,
+        "cfr_citation": "40 CFR 262.18(c)",
+        "cfr_text": (
+            "A generator must not offer its hazardous waste to transporters or "
+            "to treatment, storage, or disposal facilities that have not "
+            "received an EPA identification number."
+        ),
+    },
+    {
+        "label": "Transport start",
+        "clause_title": "Transport start",
+        "clause_text": (
+            "Subcontractor may begin hauling hazardous waste immediately upon "
+            "contract signing. An EPA identification number will be obtained "
+            "within 90 days."
+        ),
+        "cfr_title": 40,
+        "cfr_citation": "40 CFR 263.10(a)",
+        "cfr_text": (
+            "A transporter must not transport hazardous wastes without having "
+            "received an EPA identification number from the Administrator."
+        ),
+    },
+    {
+        "label": "Overseas recycling",
+        "clause_title": "Overseas recycling",
+        "clause_text": (
+            "Contractor shall arrange for spent solvents to be shipped to the "
+            "Owner's overseas recycler."
+        ),
+        "cfr_title": 40,
+        "cfr_citation": "40 CFR 262.18(e)",
+        "cfr_text": (
+            "A recognized trader must not arrange for import or export of "
+            "hazardous waste without having received an EPA identification "
+            "number from the Administrator."
+        ),
+    },
+]
+
+
+@router.get("/analyze", response_class=HTMLResponse)
+async def analyze_clause(request: Request) -> HTMLResponse:
+    """Render the single-clause analysis form (client-side submission)."""
+    ctx = _base_ctx("analyze")
+    ctx.update(
+        {
+            "request": request,
+            "examples": _ANALYZE_EXAMPLES,
+            "examples_json": json.dumps(_ANALYZE_EXAMPLES),
+        }
+    )
+    return templates.TemplateResponse(request, "dashboard/analyze.html", ctx)
 
 
 @router.get("/analyses", response_class=HTMLResponse)
